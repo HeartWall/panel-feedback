@@ -70,7 +70,9 @@ Then: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "NPM Packag
 2. Install: `Cmd+Shift+P` → `Extensions: Install from VSIX...`
 3. Configure: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "Extension Path"
 
-### MCP Configuration Examples
+### MCP Configuration
+
+After installation, add the config to your `mcp_config.json` file (usually in `~/.codeium/windsurf/` or similar):
 
 **NPM Package (Recommended):**
 ```json
@@ -83,7 +85,7 @@ Then: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "NPM Packag
 }
 ```
 
-**Extension Path:**
+**Extension Path** (use the path from "Copy MCP Config" command):
 ```json
 {
   "mcpServers": {
@@ -94,6 +96,8 @@ Then: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "NPM Packag
   }
 }
 ```
+
+💡 **Tip**: The extension command "Copy MCP Config" automatically generates the correct path for you.
 
 ## 📖 Usage
 

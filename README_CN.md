@@ -71,7 +71,9 @@ npm install -g panel-feedback-mcp
 2. 安装：`Cmd+Shift+P` → `Extensions: Install from VSIX...`
 3. 配置：`Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → 选择 "Extension Path"
 
-### MCP 配置示例
+### MCP 配置
+
+安装后，将配置添加到 `mcp_config.json` 文件（通常在 `~/.codeium/windsurf/` 或类似目录）：
 
 **NPM 包方式（推荐）：**
 ```json
@@ -84,7 +86,7 @@ npm install -g panel-feedback-mcp
 }
 ```
 
-**扩展路径方式：**
+**扩展路径方式**（使用 "Copy MCP Config" 命令获取路径）：
 ```json
 {
   "mcpServers": {
@@ -95,6 +97,8 @@ npm install -g panel-feedback-mcp
   }
 }
 ```
+
+💡 **提示**：扩展命令 "Copy MCP Config" 会自动生成正确的路径。
 
 ## 📖 使用方法
 
