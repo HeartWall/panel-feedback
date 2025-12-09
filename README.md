@@ -56,38 +56,19 @@ The feedback panel lives in your IDE - always visible, never intrusive.
 
 ### 🎯 Method 1: NPM Package (Recommended ⭐)
 
-**Super Simple - Just 3 Steps:**
-
-1. **Install Extension**: Download from [Releases](https://github.com/fhyfhy17/panel-feedback/releases) or install from marketplace
-2. **Install MCP Server**: 
-   ```bash
-   npm install -g panel-feedback-mcp
-   ```
-3. **Auto-Configure**: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "NPM Package"
-
-✨ **That's it!** No path configuration needed.
-
-### 📦 Method 2: Direct Extension
-
-1. **Download** the `.vsix` file from [Releases](https://github.com/fhyfhy17/panel-feedback/releases)
-2. **Install** - Choose one method:
-   - **GUI**: Open VS Code/Windsurf → `Cmd+Shift+P` → `Extensions: Install from VSIX...` → Select the file  
-   - **CLI**: `code --install-extension windsurf-feedback-panel-1.1.0.vsix`
-3. **Configure MCP**: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "Extension Path" → Paste into `mcp_config.json`
-4. **Done!** The panel appears in your sidebar.
-
----
-
-### 🛠️ Build from Source
-
 ```bash
-git clone https://github.com/fhyfhy17/panel-feedback.git
-cd panel-feedback
-npm install
-npm run compile
-npx vsce package --allow-missing-repository
-code --install-extension windsurf-feedback-panel-1.1.0.vsix
+npm install -g panel-feedback-mcp
 ```
+
+Then: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "NPM Package"
+
+✨ **That's it!** No path hassles.
+
+### 📦 Method 2: Direct Extension  
+
+1. Download latest `.vsix` from [**Releases**](https://github.com/fhyfhy17/panel-feedback/releases/latest)
+2. Install: `Cmd+Shift+P` → `Extensions: Install from VSIX...`
+3. Configure: `Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → Choose "Extension Path"
 
 ### MCP Configuration Examples
 

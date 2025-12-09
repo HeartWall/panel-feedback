@@ -55,37 +55,21 @@
 
 ## 🚀 安装
 
-### 🎯 方式一：NPM 包（最简单）
-
-1. **安装扩展**：从 [VS Code 应用市场](https://marketplace.visualstudio.com) 搜索 "Panel Feedback"
-2. **安装 MCP 服务器**：
-   ```bash
-   npm install -g panel-feedback-mcp
-   ```
-3. **配置 MCP**：`Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → 选择 "NPM Package" → 粘贴到 `mcp_config.json`
-4. **完成！** 侧边栏出现面板。
-
-### 📦 方式二：直接安装扩展
-
-1. **下载** `.vsix` 文件：[Releases](https://github.com/fhyfhy17/panel-feedback/releases)
-2. **安装** - 选择一种方式：
-   - **图形界面**：打开 VS Code/Windsurf → `Cmd+Shift+P` → `Extensions: Install from VSIX...` → 选择文件
-   - **命令行**：`code --install-extension windsurf-feedback-panel-1.1.0.vsix`
-3. **配置 MCP**：`Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → 选择 "Extension Path" → 粘贴到 `mcp_config.json`
-4. **完成！** 侧边栏出现面板。
-
----
-
-### 🛠️ 从源码构建
+### 🎯 方式一：NPM 包（推荐 ⭐）
 
 ```bash
-git clone https://github.com/fhyfhy17/panel-feedback.git
-cd panel-feedback
-npm install
-npm run compile
-npx vsce package --allow-missing-repository
-code --install-extension windsurf-feedback-panel-2.0.0.vsix
+npm install -g panel-feedback-mcp
 ```
+
+然后：`Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → 选择 "NPM Package"
+
+✨ **就这样！** 无需路径配置。
+
+### 📦 方式二：直接扩展
+
+1. 下载最新 `.vsix`：[**发布页面**](https://github.com/fhyfhy17/panel-feedback/releases/latest)
+2. 安装：`Cmd+Shift+P` → `Extensions: Install from VSIX...`
+3. 配置：`Cmd+Shift+P` → `Panel Feedback: Copy MCP Config` → 选择 "Extension Path"
 
 ### MCP 配置示例
 
