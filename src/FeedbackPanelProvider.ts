@@ -95,6 +95,13 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             timestamp: Date.now()
         });
 
+        // 如果 webview 未初始化，先打开面板
+        if (!this._view) {
+            await vscode.commands.executeCommand('feedbackPanel.view.focus');
+            // 等待 webview 初始化
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
         if (this._view) {
             // false = 不保留焦点，让面板获得焦点
             this._view.show?.(false);
