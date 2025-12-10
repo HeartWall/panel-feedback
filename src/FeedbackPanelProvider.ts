@@ -370,20 +370,20 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
         .hidden { display: none !important; }
         
-        /* 新消息高亮样式 - 2秒闪烁效果 */
+        /* 新消息高亮样式 - 1.5秒蓝色闪烁效果 */
         .current-question.new-message {
-            animation: flashHighlight 2s ease-out;
+            animation: flashHighlight 1.5s ease-out;
         }
         
         @keyframes flashHighlight {
             0% { 
-                background: rgba(255, 152, 0, 0.15);
-                border-left: 3px solid #FF9800;
+                background: rgba(33, 150, 243, 0.15);
+                border-left: 3px solid #2196F3;
                 transform: scale(1.01);
             }
             50% { 
-                background: rgba(255, 152, 0, 0.1);
-                border-left: 3px solid #FF9800;
+                background: rgba(33, 150, 243, 0.1);
+                border-left: 3px solid #2196F3;
             }
             100% { 
                 background: var(--vscode-editor-background);
@@ -465,10 +465,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             void question.offsetWidth; // 触发 reflow
             question.classList.add('new-message');
             
-            // 2秒后移除 class
+            // 1.5秒后移除 class
             setTimeout(() => {
                 question.classList.remove('new-message');
-            }, 2000);
+            }, 1500);
         }
 
         // 简单的 Markdown 渲染
