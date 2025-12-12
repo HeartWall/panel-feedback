@@ -398,38 +398,37 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
         </svg>
-        <p>等待 AI 请求反馈...</p>
+        <p>Waiting for AI...</p>
     </div>
 
     <div id="feedbackArea" class="hidden" style="position: relative; display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
-        <button id="clearHistoryBtn" class="clear-history-btn" title="清除历史">🗑️ 清除</button>
+        <button id="clearHistoryBtn" class="clear-history-btn" title="Clear history">🗑️ Clear</button>
         
         <!-- 历史对话区域 -->
         <div id="chatHistory" class="chat-container"></div>
         
         <!-- 当前问题区域 -->
         <div id="currentQuestion" class="current-question">
-            <div class="label">🤖 AI 提问</div>
+            <div class="label">🤖 AI</div>
             <div id="messageContent" class="message"></div>
         </div>
         
         <div id="optionsContainer" class="options-container"></div>
         
         <div id="dropZone">
-            📷 拖拽图片到这里或粘贴
+            📷 Drop or paste image here
         </div>
 
         <div class="input-area">
             <div id="imagePreview" class="image-preview"></div>
             <textarea 
                 id="feedbackInput" 
-                placeholder="输入反馈内容，支持粘贴图片 (Ctrl+V)..."
+                placeholder="Type your feedback, paste image (Ctrl+V)..."
             ></textarea>
             <div class="toolbar">
-                <button class="toolbar-btn" id="pasteBtn">📋 粘贴图片</button>
                 <input type="file" id="fileInput" accept="image/*" multiple style="display: none;">
-                <button class="toolbar-btn" id="uploadBtn">📁 上传图片</button>
-                <button class="submit-btn" id="submitBtn">提交反馈</button>
+                <button class="toolbar-btn" id="uploadBtn">📁 Upload</button>
+                <button class="submit-btn" id="submitBtn">Submit</button>
             </div>
         </div>
     </div>
@@ -444,8 +443,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const feedbackInput = document.getElementById('feedbackInput');
         const imagePreview = document.getElementById('imagePreview');
         const submitBtn = document.getElementById('submitBtn');
-        const pasteBtn = document.getElementById('pasteBtn');
-        const uploadBtn = document.getElementById('uploadBtn');
+                const uploadBtn = document.getElementById('uploadBtn');
         const fileInput = document.getElementById('fileInput');
         const dropZone = document.getElementById('dropZone');
         const chatHistory = document.getElementById('chatHistory');
@@ -515,7 +513,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 if (msg.role === 'ai') {
                     content = '<div class="message">' + renderMarkdown(msg.content) + '</div>';
                 } else {
-                    content = '<div>' + (msg.content || '<em>(空)</em>') + '</div>';
+                    content = '<div>' + (msg.content || '<em>(empty)</em>') + '</div>';
                     if (msg.images && msg.images.length > 0) {
                         content += '<div class="user-images">';
                         msg.images.forEach(img => {
@@ -648,7 +646,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             const div = document.createElement('div');
             div.id = 'waitingHint';
             div.style.cssText = 'text-align: center; padding: 20px; color: var(--vscode-descriptionForeground); font-size: 13px;';
-            div.innerHTML = '⏳ 等待 AI 下一个问题...';
+            div.innerHTML = '⏳ Waiting for AI...';
             feedbackArea.appendChild(div);
             return div;
         }
