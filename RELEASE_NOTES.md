@@ -1,3 +1,15 @@
+# Panel Feedback v1.4.9
+
+## 🔧 Improvements
+
+### Fixed: Node path also changes on version upgrade
+- **Root Cause**: nvm node path contains version number (e.g. `~/.nvm/versions/node/v20.19.5/bin/node`)
+- **Solution**: Create a symlink `~/.panel-feedback/node` pointing to current node
+- **Benefit**: Node version upgrades only require IDE restart, no MCP reconfiguration needed
+- **Note**: Windows still uses dynamic node path detection (symlinks require admin rights)
+
+---
+
 # Panel Feedback v1.4.8
 
 ## 🔧 Improvements

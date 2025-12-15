@@ -10,6 +10,7 @@ import * as os from 'os';
 // 固定的 MCP 服务器路径
 const FIXED_MCP_DIR = path.join(os.homedir(), '.panel-feedback');
 const FIXED_MCP_PATH = path.join(FIXED_MCP_DIR, 'mcp-stdio-wrapper.js');
+const FIXED_NODE_PATH = path.join(FIXED_MCP_DIR, 'node');
 
 /**
  * 获取 node 可执行文件的完整路径
@@ -98,6 +99,35 @@ function compareVersions(v1: string, v2: string): number {
 }
 
 /**
+ * 创建 node 符号链接到固定位置
+ * 这样即使升级 node 版本，重启 IDE 后符号链接会自动更新
+ */
+function createNodeSymlink(): boolean {
+    // Windows 不支持符号链接（或需要管理员权限），跳过
+    if (os.platform() === 'win32') {
+        console.log('Skipping node symlink on Windows');
+        return false;
+    }
+    
+    try {
+        const nodePath = getNodePath();
+        
+        // 删除旧的符号链接（如果存在）
+        if (fs.existsSync(FIXED_NODE_PATH)) {
+            fs.unlinkSync(FIXED_NODE_PATH);
+        }
+        
+        // 创建新的符号链接
+        fs.symlinkSync(nodePath, FIXED_NODE_PATH);
+        console.log(`Node symlink created: ${FIXED_NODE_PATH} -> ${nodePath}`);
+        return true;
+    } catch (err) {
+        console.warn(`Failed to create node symlink:`, err);
+        return false;
+    }
+}
+
+/**
  * 复制 MCP 服务器到固定位置
  * 这样用户只需配置一次 MCP，更新扩展后不用重新配置
  */
@@ -113,11 +143,15 @@ function copyMcpServerToFixedLocation(extensionUri: vscode.Uri): boolean {
         if (fs.existsSync(sourcePath)) {
             fs.copyFileSync(sourcePath, FIXED_MCP_PATH);
             console.log(`MCP server copied to: ${FIXED_MCP_PATH}`);
-            return true;
         } else {
             console.warn(`Source MCP file not found: ${sourcePath}`);
             return false;
         }
+        
+        // 创建 node 符号链接
+        createNodeSymlink();
+        
+        return true;
     } catch (err) {
         console.warn(`Failed to copy MCP server to fixed location:`, err);
         return false;
@@ -173,14 +207,21 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('feedbackPanel.copyMcpConfig', async () => {
             // 使用固定路径，这样更新扩展后不用重新配置
-            const nodePath = getNodePath();
+            // macOS/Linux 使用固定的 node 符号链接，Windows 使用动态检测的 node 路径
+            const nodePath = (os.platform() === 'win32' || !fs.existsSync(FIXED_NODE_PATH)) 
+                ? getNodePath() 
+                : FIXED_NODE_PATH;
             const config = {
                 "panel-feedback": {
                     "command": nodePath,
                     "args": [FIXED_MCP_PATH]
                 }
             };
-            const instruction = `Paste this config into mcp_config.json under mcpServers.\n\nThe MCP server path is fixed at: ${FIXED_MCP_PATH}\nYou only need to configure once - updates won't change this path.`;
+            const isFixedNode = nodePath === FIXED_NODE_PATH;
+            const instruction = `Paste this config into mcp_config.json under mcpServers.\n\n` +
+                `MCP server path: ${FIXED_MCP_PATH}\n` +
+                `Node path: ${nodePath}${isFixedNode ? ' (symlink, auto-updates on IDE restart)' : ''}\n\n` +
+                `You only need to configure once - updates won't change these paths.`;
 
             const configStr = JSON.stringify(config, null, 2);
             await vscode.env.clipboard.writeText(configStr);
