@@ -62,6 +62,21 @@
 在 VS Code/Windsurf 中：
 - `Cmd+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的文件
 
+#### ⚠️ Cursor 用户注意
+
+Cursor 安装前需要额外配置：
+
+1. 打开设置 (`Cmd+,`)
+2. 搜索 `activityBar.orientation`
+3. 在 `settings.json` 中添加：
+   ```json
+   "workbench.activityBar.orientation": "vertical"
+   ```
+4. 重启 Cursor
+5. 然后再安装 `.vsix` 文件
+
+这会让侧边栏变成竖向显示，扩展图标才能正常显示。
+
 ✅ 现在你有了 **侧边栏面板 UI**
 
 ---

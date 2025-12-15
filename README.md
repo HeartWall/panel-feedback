@@ -61,6 +61,21 @@ Download `.vsix` from [**Releases**](https://github.com/fhyfhy17/panel-feedback/
 In VS Code/Windsurf:
 - `Cmd+Shift+P` → `Extensions: Install from VSIX...` → Select the downloaded file
 
+#### ⚠️ Cursor Users
+
+Cursor requires an extra step before installing:
+
+1. Open Settings (`Cmd+,`)
+2. Search for `activityBar.orientation`
+3. Add this to your `settings.json`:
+   ```json
+   "workbench.activityBar.orientation": "vertical"
+   ```
+4. Restart Cursor
+5. Now you can install the `.vsix` file
+
+This makes the sidebar vertical so the extension icon can be displayed.
+
 ✅ Now you have the **Sidebar Panel UI**
 
 ---

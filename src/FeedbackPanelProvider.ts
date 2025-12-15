@@ -369,40 +369,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             overflow-x: auto;
             margin: 8px 0;
         }
-        .clear-history-btn {
-            position: absolute;
-            top: 8px;
-            right: 8px;
-            padding: 4px 8px;
-            font-size: 11px;
-            background: transparent;
-            color: var(--vscode-descriptionForeground);
-            border: 1px solid var(--vscode-widget-border);
-            border-radius: 4px;
-            cursor: pointer;
-            opacity: 0.7;
-        }
-        .clear-history-btn:hover {
-            opacity: 1;
-            background: var(--vscode-button-secondaryBackground);
-        }
-        .settings-btn {
-            position: fixed;
-            top: 4px;
-            right: 4px;
-            padding: 4px 8px;
-            font-size: 14px;
-            background: transparent;
-            color: var(--vscode-descriptionForeground);
-            border: none;
-            cursor: pointer;
-            opacity: 0.7;
-            z-index: 1000;
-        }
-        .settings-btn:hover {
-            opacity: 1;
-            background: var(--vscode-toolbar-hoverBackground);
-        }
+
         .settings-modal {
             display: none;
             position: fixed;
@@ -659,8 +626,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     </style>
 </head>
 <body>
-    <button id="settingsBtn" class="settings-btn" title="Settings">⚙️</button>
-
     <div id="settingsModal" class="settings-modal">
         <div class="settings-content">
             <div class="settings-title">
@@ -688,8 +653,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="feedbackArea" class="hidden" style="position: relative; display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
-        <button id="clearHistoryBtn" class="clear-history-btn" title="Clear history">🗑️ Clear</button>
-        
         <!-- 历史对话区域 -->
         <div id="chatHistory" class="chat-container"></div>
         
@@ -730,7 +693,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const submitBtn = document.getElementById('submitBtn');
                         const dropZone = document.getElementById('dropZone');
         const chatHistory = document.getElementById('chatHistory');
-        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
         const currentQuestion = document.getElementById('currentQuestion');
 
         let images = [];
@@ -1024,14 +986,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        // 清除历史按钮
-        clearHistoryBtn.onclick = () => {
-            vscode.postMessage({ type: 'clearHistory' });
-            historyData = [];
-            chatHistory.innerHTML = '';
-            chatHistory.style.display = 'none';
-        };
-
         // 复制按钮
         const copyBtn = document.getElementById('copyBtn');
         copyBtn.onclick = () => {
@@ -1046,17 +1000,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             });
         };
 
-        // 设置按钮
-        const settingsBtn = document.getElementById('settingsBtn');
+        // 设置弹窗
         const settingsModal = document.getElementById('settingsModal');
         const closeSettings = document.getElementById('closeSettings');
         const checkUpdateBtn = document.getElementById('checkUpdateBtn');
         const versionText = document.getElementById('versionText');
-
-        settingsBtn.onclick = () => {
-            settingsModal.classList.add('show');
-            vscode.postMessage({ type: 'getVersion' });
-        };
 
         closeSettings.onclick = () => {
             settingsModal.classList.remove('show');

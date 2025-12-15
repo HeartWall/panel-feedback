@@ -3,6 +3,13 @@ import { FeedbackPanelProvider } from './FeedbackPanelProvider';
 import { MCPServer } from './mcpServer';
 import { execSync } from 'child_process';
 import * as https from 'https';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+// 固定的 MCP 服务器路径
+const FIXED_MCP_DIR = path.join(os.homedir(), '.panel-feedback');
+const FIXED_MCP_PATH = path.join(FIXED_MCP_DIR, 'mcp-stdio-wrapper.js');
 
 /**
  * 获取 node 可执行文件的完整路径
@@ -90,8 +97,38 @@ function compareVersions(v1: string, v2: string): number {
     return 0;
 }
 
+/**
+ * 复制 MCP 服务器到固定位置
+ * 这样用户只需配置一次 MCP，更新扩展后不用重新配置
+ */
+function copyMcpServerToFixedLocation(extensionUri: vscode.Uri): boolean {
+    try {
+        // 创建目录（如果不存在）
+        if (!fs.existsSync(FIXED_MCP_DIR)) {
+            fs.mkdirSync(FIXED_MCP_DIR, { recursive: true });
+        }
+        
+        // 复制 mcp-stdio-wrapper.js
+        const sourcePath = vscode.Uri.joinPath(extensionUri, 'mcp-stdio-wrapper.js').fsPath;
+        if (fs.existsSync(sourcePath)) {
+            fs.copyFileSync(sourcePath, FIXED_MCP_PATH);
+            console.log(`MCP server copied to: ${FIXED_MCP_PATH}`);
+            return true;
+        } else {
+            console.warn(`Source MCP file not found: ${sourcePath}`);
+            return false;
+        }
+    } catch (err) {
+        console.warn(`Failed to copy MCP server to fixed location:`, err);
+        return false;
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('Windsurf Feedback Panel is now active!');
+    
+    // 复制 MCP 服务器到固定位置
+    copyMcpServerToFixedLocation(context.extensionUri);
     
     // Check for updates (delayed to not block activation)
     setTimeout(() => checkForUpdates(), 5000);
@@ -135,22 +172,21 @@ export function activate(context: vscode.ExtensionContext) {
     // 复制 MCP 配置命令
     context.subscriptions.push(
         vscode.commands.registerCommand('feedbackPanel.copyMcpConfig', async () => {
-            // 直接使用扩展路径方式
-            const wrapperPath = vscode.Uri.joinPath(context.extensionUri, 'mcp-stdio-wrapper.js').fsPath;
+            // 使用固定路径，这样更新扩展后不用重新配置
             const nodePath = getNodePath();
             const config = {
                 "panel-feedback": {
                     "command": nodePath,
-                    "args": [wrapperPath]
+                    "args": [FIXED_MCP_PATH]
                 }
             };
-            const instruction = 'Paste this config into mcp_config.json under mcpServers.';
+            const instruction = `Paste this config into mcp_config.json under mcpServers.\n\nThe MCP server path is fixed at: ${FIXED_MCP_PATH}\nYou only need to configure once - updates won't change this path.`;
 
             const configStr = JSON.stringify(config, null, 2);
             await vscode.env.clipboard.writeText(configStr);
             
             vscode.window.showInformationMessage(
-                '✅ MCP config copied to clipboard!', 
+                '✅ MCP config copied to clipboard! (using fixed path)', 
                 'Show Instructions'
             ).then(action => {
                 if (action === 'Show Instructions') {

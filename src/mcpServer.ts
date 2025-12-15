@@ -11,6 +11,7 @@ interface PortRegistryEntry {
     workspace: string;
     lastActive: number;
     pid: number;
+    vscodePid?: string;  // VSCODE_PID 环境变量，用于精确路由
 }
 
 interface PortRegistry {
@@ -48,8 +49,8 @@ export class MCPServer {
     private port: number = 0;
     private pendingRequests: Map<string, PendingRequest> = new Map();
     private context: vscode.ExtensionContext | null = null;
-    private heartbeatInterval: NodeJS.Timeout | null = null;
     private workspace: string = '';
+    private vscodePid: string = '';
     
     // 端口范围
     private static readonly PORT_MIN = 19876;
@@ -60,6 +61,37 @@ export class MCPServer {
     constructor(private provider: FeedbackPanelProvider) {
         // 获取当前工作区路径
         this.workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        // 获取 VSCODE_PID 用于精确路由
+        this.vscodePid = process.env.VSCODE_PID || '';
+    }
+
+    private getPidRegistryFile(): string {
+        return path.join(MCPServer.REGISTRY_DIR, `port-${process.pid}.json`);
+    }
+
+    private writePidRegistry(): void {
+        try {
+            if (!fs.existsSync(MCPServer.REGISTRY_DIR)) {
+                fs.mkdirSync(MCPServer.REGISTRY_DIR, { recursive: true });
+            }
+            fs.writeFileSync(
+                this.getPidRegistryFile(),
+                JSON.stringify({ port: this.port, workspace: this.workspace, pid: process.pid, vscodePid: this.vscodePid }, null, 2)
+            );
+        } catch (e) {
+            console.error('Failed to write pid registry:', e);
+        }
+    }
+
+    private deletePidRegistry(): void {
+        try {
+            const f = this.getPidRegistryFile();
+            if (fs.existsSync(f)) {
+                fs.unlinkSync(f);
+            }
+        } catch (e) {
+            console.error('Failed to delete pid registry:', e);
+        }
     }
 
     // 设置扩展上下文（用于持久化）
@@ -152,28 +184,6 @@ export class MCPServer {
         return content;
     }
 
-    // 查找可用端口
-    private async findAvailablePort(): Promise<number> {
-        for (let port = MCPServer.PORT_MIN; port <= MCPServer.PORT_MAX; port++) {
-            if (await this.isPortAvailable(port)) {
-                return port;
-            }
-        }
-        throw new Error('No available port in range');
-    }
-
-    private isPortAvailable(port: number): Promise<boolean> {
-        return new Promise((resolve) => {
-            const server = http.createServer();
-            server.once('error', () => resolve(false));
-            server.once('listening', () => {
-                server.close();
-                resolve(true);
-            });
-            server.listen(port, '127.0.0.1');
-        });
-    }
-
     // 读取端口注册表
     private readRegistry(): PortRegistry {
         try {
@@ -213,22 +223,24 @@ export class MCPServer {
             }
         });
         
-        // 移除相同工作区的旧注册
-        registry.windows = registry.windows.filter(entry => entry.workspace !== this.workspace);
+        // 移除同一进程的旧注册（同一个 Extension Host 重启/重复注册）
+        registry.windows = registry.windows.filter(entry => entry.pid !== process.pid);
         
         // 添加新注册
         registry.windows.push({
             port: this.port,
             workspace: this.workspace,
             lastActive: Date.now(),
-            pid: process.pid
+            pid: process.pid,
+            vscodePid: this.vscodePid
         });
         
         this.writeRegistry(registry);
+        this.writePidRegistry();
     }
 
-    // 更新心跳
-    private updateHeartbeat(): void {
+    // 收到 MCP 请求时更新活动时间（不用持续心跳，避免切换窗口影响路由）
+    private updateLastActive(): void {
         const registry = this.readRegistry();
         const entry = registry.windows.find(e => e.port === this.port && e.pid === process.pid);
         if (entry) {
@@ -244,31 +256,10 @@ export class MCPServer {
             entry => !(entry.port === this.port && entry.pid === process.pid)
         );
         this.writeRegistry(registry);
-    }
-
-    // 启动心跳定时器
-    private startHeartbeat(): void {
-        // 每秒更新一次心跳
-        this.heartbeatInterval = setInterval(() => {
-            this.updateHeartbeat();
-        }, 1000);
+        this.deletePidRegistry();
     }
 
     async start() {
-        try {
-            // 查找可用端口
-            this.port = await this.findAvailablePort();
-            
-            // 注册到端口注册表
-            this.registerWindow();
-            
-            // 启动心跳
-            this.startHeartbeat();
-        } catch (e) {
-            console.error('Failed to start MCP server:', e);
-            return;
-        }
-
         this.server = http.createServer(async (req, res) => {
             // CORS headers
             res.setHeader('Access-Control-Allow-Origin', '*');
@@ -318,13 +309,40 @@ export class MCPServer {
             });
         });
 
-        this.server.listen(this.port, () => {
-            console.log(`MCP Feedback Server running on port ${this.port}`);
+        // 尝试监听端口，失败则重试下一个
+        await this.tryListen();
+    }
+
+    // 尝试监听端口，失败时自动重试下一个端口
+    private tryListen(): Promise<void> {
+        return new Promise((resolve) => {
+            this.server?.removeAllListeners('error');
+            this.server?.removeAllListeners('listening');
+
+            this.server?.once('error', (err: NodeJS.ErrnoException) => {
+                console.error(`Failed to start server: ${err.message}`);
+                resolve();
+            });
+
+            this.server?.once('listening', () => {
+                const addr = this.server?.address();
+                if (addr && typeof addr === 'object') {
+                    this.port = addr.port;
+                }
+                console.log(`MCP Feedback Server running on port ${this.port}`);
+                this.registerWindow();
+                resolve();
+            });
+
+            this.server?.listen(0, '127.0.0.1');
         });
     }
 
     // 处理提交请求（快速返回）
     private async handleSubmit(data: any): Promise<any> {
+        // 收到 MCP 请求时更新活动时间
+        this.updateLastActive();
+        
         const { requestId, params } = data;
 
         const request: PendingRequest = {
@@ -497,12 +515,6 @@ export class MCPServer {
     }
 
     stop() {
-        // 停止心跳
-        if (this.heartbeatInterval) {
-            clearInterval(this.heartbeatInterval);
-            this.heartbeatInterval = null;
-        }
-        
         // 注销窗口
         this.unregisterWindow();
         

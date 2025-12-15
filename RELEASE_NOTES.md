@@ -1,3 +1,18 @@
+# Panel Feedback v1.4.8
+
+## 🔧 Improvements
+
+### Fixed: MCP config needs reconfiguration after extension update
+- **Root Cause**: Extension path contains version number, changes on every update
+- **Solution**: MCP server is now copied to a fixed location `~/.panel-feedback/mcp-stdio-wrapper.js`
+- **Benefit**: Users only need to configure MCP once, updates won't change the path
+
+### Added: Cursor installation instructions
+- Added special installation steps for Cursor users in README
+- Cursor requires `"workbench.activityBar.orientation": "vertical"` setting before installing the extension
+
+---
+
 # Panel Feedback v1.1.3
 
 ## 🐛 Bug Fix

@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
 // 端口注册表配置
 const REGISTRY_DIR = path.join(os.homedir(), '.panel-feedback');
@@ -37,24 +38,82 @@ function readRegistry() {
     return { windows: [] };
 }
 
-// 根据工作区或最近活动时间选择目标端口
+function readPidRegistry(extensionHostPid) {
+    try {
+        if (!extensionHostPid) return null;
+        const f = path.join(REGISTRY_DIR, `port-${extensionHostPid}.json`);
+        if (!fs.existsSync(f)) return null;
+        const content = fs.readFileSync(f, 'utf-8');
+        return JSON.parse(content);
+    } catch (e) {
+        process.stderr.write(`Failed to read pid registry: ${e.message}\n`);
+        return null;
+    }
+}
+
+function getParentPid(pid) {
+    try {
+        const result = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf-8' });
+        const parentPid = result.trim();
+        return parentPid;
+    } catch {
+        return null;
+    }
+}
+
+function findPidRegistryOwnerPid() {
+    let cur = process.ppid;
+    for (let i = 0; i < 8 && cur; i++) {
+        const f = path.join(REGISTRY_DIR, `port-${cur}.json`);
+        if (fs.existsSync(f)) {
+            return String(cur);
+        }
+        const next = getParentPid(cur);
+        if (!next) return null;
+        cur = next;
+    }
+    return null;
+}
+
+// 根据 Extension Host PID、VSCODE_PID、工作区或最近活动时间选择目标端口
 function selectTargetPort(workspace) {
+    const ownerPid = findPidRegistryOwnerPid();
+    if (ownerPid) {
+        const pidReg = readPidRegistry(ownerPid);
+        if (pidReg && pidReg.port) {
+            process.stderr.write(`Matched by pid registry: ${ownerPid} -> port ${pidReg.port}\n`);
+            return pidReg.port;
+        }
+    }
+
     const registry = readRegistry();
     
     if (registry.windows.length === 0) {
         return DEFAULT_PORT;  // 回退到默认端口
     }
     
-    // 如果指定了工作区，精确匹配
-    if (workspace) {
-        const entry = registry.windows.find(e => e.workspace === workspace);
+    // 策略 2：使用 VSCODE_PID 匹配（支持多窗口）
+    const vscodePid = process.env.VSCODE_PID;
+    if (vscodePid) {
+        const entry = registry.windows.find(e => e.vscodePid === vscodePid);
         if (entry) {
+            process.stderr.write(`Matched by VSCODE_PID: ${vscodePid} -> port ${entry.port}\n`);
             return entry.port;
         }
     }
     
-    // 否则选择最近活动的窗口
+    // 策略 3：如果指定了工作区，精确匹配
+    if (workspace) {
+        const entry = registry.windows.find(e => e.workspace === workspace);
+        if (entry) {
+            process.stderr.write(`Matched by workspace: ${workspace} -> port ${entry.port}\n`);
+            return entry.port;
+        }
+    }
+    
+    // 策略 4：否则选择最近活动的窗口
     const sorted = [...registry.windows].sort((a, b) => b.lastActive - a.lastActive);
+    process.stderr.write(`Fallback to most recent: port ${sorted[0].port}\n`);
     return sorted[0].port;
 }
 
@@ -157,13 +216,48 @@ async function pollForResult(requestId, targetPort) {
     throw new Error('Poll timeout after 7 days');
 }
 
+// 写调试日志到文件
+function writeDebugLog(content) {
+    try {
+        const logDir = path.join(os.homedir(), '.panel-feedback');
+        const logFile = path.join(logDir, 'debug.log');
+        if (!fs.existsSync(logDir)) {
+            fs.mkdirSync(logDir, { recursive: true });
+        }
+        const timestamp = new Date().toISOString();
+        fs.appendFileSync(logFile, `[${timestamp}] ${content}\n`);
+    } catch (e) {
+        // ignore
+    }
+}
+
 // 处理 tools/call 请求（使用轮询）
 async function handleToolCall(mcpId, params) {
     const requestId = generateRequestId();
     
+    // 调试日志：写入文件
+    writeDebugLog('=== MCP Call Debug ===');
+    writeDebugLog(`Params: ${JSON.stringify(params, null, 2)}`);
+    writeDebugLog(`PID: ${process.pid}, PPID: ${process.ppid}`);
+    writeDebugLog(`Pid registry owner PID: ${findPidRegistryOwnerPid() || 'unknown'}`);
+    writeDebugLog(`CWD: ${process.cwd()}`);
+    writeDebugLog(`PWD: ${process.env.PWD || 'not set'}`);
+    writeDebugLog(`HOME: ${process.env.HOME || 'not set'}`);
+    // 检查是否有 workspace 相关的环境变量
+    const workspaceEnvs = Object.entries(process.env).filter(([k]) => 
+        k.toLowerCase().includes('workspace') || 
+        k.toLowerCase().includes('folder') ||
+        k.toLowerCase().includes('project') ||
+        k.toLowerCase().includes('vscode') ||
+        k.toLowerCase().includes('windsurf')
+    );
+    writeDebugLog(`Workspace-related envs: ${JSON.stringify(Object.fromEntries(workspaceEnvs), null, 2)}`);
+    writeDebugLog('======================');
+    
     // 从参数中提取 workspace（如果有）
     const workspace = params?.arguments?.workspace || '';
     const targetPort = selectTargetPort(workspace);
+    writeDebugLog(`Selected target port: ${targetPort}`);
     
     process.stderr.write(`Routing to port ${targetPort}${workspace ? ` (workspace: ${workspace})` : ' (most recent)'}\n`);
     
