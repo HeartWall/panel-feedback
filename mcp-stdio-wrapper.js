@@ -75,8 +75,8 @@ function findPidRegistryOwnerPid() {
     return null;
 }
 
-// 根据 Extension Host PID、VSCODE_PID、工作区或最近活动时间选择目标端口
-function selectTargetPort(workspace) {
+// 根据 Extension Host PID、VSCODE_PID、工作区哈希、工作区路径或最近活动时间选择目标端口
+function selectTargetPort(workspace, workspaceHash) {
     const ownerPid = findPidRegistryOwnerPid();
     if (ownerPid) {
         const pidReg = readPidRegistry(ownerPid);
@@ -92,7 +92,16 @@ function selectTargetPort(workspace) {
         return DEFAULT_PORT;  // 回退到默认端口
     }
     
-    // 策略 2：使用 VSCODE_PID 匹配（支持多窗口）
+    // 策略 2：使用工作区哈希值匹配（最精确）
+    if (workspaceHash) {
+        const entry = registry.windows.find(e => e.workspaceHash === workspaceHash);
+        if (entry) {
+            process.stderr.write(`Matched by workspaceHash: ${workspaceHash} -> port ${entry.port}\n`);
+            return entry.port;
+        }
+    }
+    
+    // 策略 3：使用 VSCODE_PID 匹配（支持多窗口）
     const vscodePid = process.env.VSCODE_PID;
     if (vscodePid) {
         const entry = registry.windows.find(e => e.vscodePid === vscodePid);
@@ -102,7 +111,7 @@ function selectTargetPort(workspace) {
         }
     }
     
-    // 策略 3：如果指定了工作区，精确匹配
+    // 策略 4：如果指定了工作区路径，精确匹配
     if (workspace) {
         const entry = registry.windows.find(e => e.workspace === workspace);
         if (entry) {
@@ -111,7 +120,7 @@ function selectTargetPort(workspace) {
         }
     }
     
-    // 策略 4：否则选择最近活动的窗口
+    // 策略 5：否则选择最近活动的窗口
     const sorted = [...registry.windows].sort((a, b) => b.lastActive - a.lastActive);
     process.stderr.write(`Fallback to most recent: port ${sorted[0].port}\n`);
     return sorted[0].port;
@@ -254,12 +263,15 @@ async function handleToolCall(mcpId, params) {
     writeDebugLog(`Workspace-related envs: ${JSON.stringify(Object.fromEntries(workspaceEnvs), null, 2)}`);
     writeDebugLog('======================');
     
-    // 从参数中提取 workspace（如果有）
+    // 从参数中提取 workspace 和 workspaceHash（如果有）
     const workspace = params?.arguments?.workspace || '';
-    const targetPort = selectTargetPort(workspace);
+    const workspaceHash = params?.arguments?.workspace_hash || '';
+    const targetPort = selectTargetPort(workspace, workspaceHash);
     writeDebugLog(`Selected target port: ${targetPort}`);
     
-    process.stderr.write(`Routing to port ${targetPort}${workspace ? ` (workspace: ${workspace})` : ' (most recent)'}\n`);
+    const routeInfo = workspaceHash ? `workspace_hash: ${workspaceHash}` : 
+                      workspace ? `workspace: ${workspace}` : 'most recent';
+    process.stderr.write(`Routing to port ${targetPort} (${routeInfo})\n`);
     
     // 1. 提交请求（快速返回）
     const submitResult = await sendRequest('/submit', {
@@ -304,8 +316,8 @@ async function handleToolCall(mcpId, params) {
 }
 
 // 处理其他 MCP 请求（直接转发）
-async function handleOtherRequest(request, workspace) {
-    const targetPort = selectTargetPort(workspace);
+async function handleOtherRequest(request, workspace, workspaceHash) {
+    const targetPort = selectTargetPort(workspace, workspaceHash);
     const result = await sendRequest('/', request, targetPort);
     
     if (result._connectionRefused) {
@@ -367,9 +379,13 @@ rl.on('line', async (line) => {
                                     items: { type: 'string' },
                                     description: '预定义的选项按钮列表'
                                 },
+                                workspace_hash: {
+                                    type: 'string',
+                                    description: '工作区哈希值（8位），用于多项目时精确路由到对应窗口'
+                                },
                                 workspace: {
                                     type: 'string',
-                                    description: '目标工作区路径（可选，用于多窗口时精确路由）'
+                                    description: '目标工作区完整路径（可选，用于多窗口时精确路由）'
                                 }
                             },
                             required: ['message']

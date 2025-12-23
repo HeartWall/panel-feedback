@@ -9,6 +9,7 @@ import { FeedbackPanelProvider } from './FeedbackPanelProvider';
 interface PortRegistryEntry {
     port: number;
     workspace: string;
+    workspaceHash: string;  // 工作空间路径哈希值
     lastActive: number;
     pid: number;
     vscodePid?: string;  // VSCODE_PID 环境变量，用于精确路由
@@ -50,6 +51,7 @@ export class MCPServer {
     private pendingRequests: Map<string, PendingRequest> = new Map();
     private context: vscode.ExtensionContext | null = null;
     private workspace: string = '';
+    private workspaceHash: string = '';  // 工作空间哈希值
     private vscodePid: string = '';
     
     // 端口范围
@@ -61,8 +63,28 @@ export class MCPServer {
     constructor(private provider: FeedbackPanelProvider) {
         // 获取当前工作区路径
         this.workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        // 生成工作空间哈希值（取前8位）
+        this.workspaceHash = this.generateWorkspaceHash(this.workspace);
         // 获取 VSCODE_PID 用于精确路由
         this.vscodePid = process.env.VSCODE_PID || '';
+    }
+
+    // 生成工作空间路径的哈希值
+    private generateWorkspaceHash(workspacePath: string): string {
+        if (!workspacePath) return '';
+        const crypto = require('crypto');
+        const hash = crypto.createHash('md5').update(workspacePath).digest('hex');
+        return hash.substring(0, 8);  // 取前8位，足够区分
+    }
+
+    // 获取工作空间哈希值（供外部使用）
+    public getWorkspaceHash(): string {
+        return this.workspaceHash;
+    }
+
+    // 获取工作空间路径（供外部使用）
+    public getWorkspacePath(): string {
+        return this.workspace;
     }
 
     private getPidRegistryFile(): string {
@@ -76,7 +98,13 @@ export class MCPServer {
             }
             fs.writeFileSync(
                 this.getPidRegistryFile(),
-                JSON.stringify({ port: this.port, workspace: this.workspace, pid: process.pid, vscodePid: this.vscodePid }, null, 2)
+                JSON.stringify({ 
+                    port: this.port, 
+                    workspace: this.workspace, 
+                    workspaceHash: this.workspaceHash,
+                    pid: process.pid, 
+                    vscodePid: this.vscodePid 
+                }, null, 2)
             );
         } catch (e) {
             console.error('Failed to write pid registry:', e);
@@ -230,6 +258,7 @@ export class MCPServer {
         registry.windows.push({
             port: this.port,
             workspace: this.workspace,
+            workspaceHash: this.workspaceHash,
             lastActive: Date.now(),
             pid: process.pid,
             vscodePid: this.vscodePid

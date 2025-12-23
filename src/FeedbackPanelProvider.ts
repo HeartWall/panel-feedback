@@ -19,8 +19,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _currentRequestId?: string;
     private _chatHistory: ChatMessage[] = [];
     private _rules: string = '';
+    private _workspaceHash: string = '';  // 工作空间哈希值
+    private _workspaceName: string = '';  // 工作空间名称
 
-    constructor(private readonly _extensionUri: vscode.Uri) {}
+    constructor(private readonly _extensionUri: vscode.Uri) {
+        // 生成工作空间哈希值
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        this._workspaceName = vscode.workspace.workspaceFolders?.[0]?.name || '';
+        if (workspacePath) {
+            const crypto = require('crypto');
+            const hash = crypto.createHash('md5').update(workspacePath).digest('hex');
+            this._workspaceHash = hash.substring(0, 8);
+        }
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -60,8 +71,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'getVersion':
                     this._sendVersionInfo();
                     break;
+                case 'getWorkspaceInfo':
+                    this._sendWorkspaceInfo();
+                    break;
                 case 'checkUpdate':
                     this._checkForUpdates();
+                    break;
+                case 'endConversation':
+                    this._handleEndConversation();
+                    break;
+                case 'copyToClipboard':
+                    vscode.env.clipboard.writeText(data.text);
                     break;
             }
         });
@@ -71,6 +91,16 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const ext = vscode.extensions.getExtension('fhyfhy17.windsurf-feedback-panel');
         const version = ext?.packageJSON.version || 'unknown';
         this._view?.webview.postMessage({ type: 'versionInfo', version });
+    }
+
+    private _sendWorkspaceInfo() {
+        const msgData = { 
+            type: 'workspaceInfo', 
+            workspaceHash: this._workspaceHash,
+            workspaceName: this._workspaceName
+        };
+        this._view?.webview.postMessage(msgData);
+        this._editorPanel?.webview.postMessage(msgData);
     }
 
     private _checkForUpdates() {
@@ -261,7 +291,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const fs = require('fs');
         const path = require('path');
         const os = require('os');
-        const rulesFile = path.join(os.homedir(), '.panel-feedback', 'rules.txt');
+        // 使用工作空间哈希值隔离不同项目的 rules
+        const rulesDir = path.join(os.homedir(), '.panel-feedback');
+        const rulesFile = this._workspaceHash 
+            ? path.join(rulesDir, `rules-${this._workspaceHash}.txt`)
+            : path.join(rulesDir, 'rules.txt');
         
         try {
             if (fs.existsSync(rulesFile)) {
@@ -281,7 +315,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const path = require('path');
         const os = require('os');
         const rulesDir = path.join(os.homedir(), '.panel-feedback');
-        const rulesFile = path.join(rulesDir, 'rules.txt');
+        // 使用工作空间哈希值隔离不同项目的 rules
+        const rulesFile = this._workspaceHash 
+            ? path.join(rulesDir, `rules-${this._workspaceHash}.txt`)
+            : path.join(rulesDir, 'rules.txt');
         
         try {
             if (!fs.existsSync(rulesDir)) {
@@ -305,6 +342,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._editorPanel) {
             this._editorPanel.webview.postMessage(msgData);
         }
+    }
+    
+    private _handleEndConversation() {
+        // 结束对话：向 AI 发送结束信号
+        if (this._pendingResolve) {
+            this._pendingResolve('[用户主动结束了对话]');
+            this._pendingResolve = undefined;
+        }
+        this.clearHistory();
+        // 重置 UI 到空状态
+        const msgData = { type: 'resetToEmpty' };
+        this._view?.webview.postMessage(msgData);
+        this._editorPanel?.webview.postMessage(msgData);
     }
     
     public clearHistory() {
@@ -874,51 +924,210 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             position: relative;
             display: inline-block;
         }
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            background: var(--vscode-input-background);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 12px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .input-wrapper:focus-within {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+        }
         textarea {
             width: 100%;
-            min-height: 80px;
-            padding: 10px;
-            background: var(--vscode-input-background);
+            min-height: 60px;
+            max-height: 200px;
+            padding: 12px 14px;
+            padding-bottom: 8px;
+            background: transparent;
             color: var(--vscode-input-foreground);
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 4px;
-            resize: vertical;
+            border: none;
+            border-radius: 12px 12px 0 0;
+            resize: none;
             font-family: inherit;
-            font-size: inherit;
+            font-size: 13px;
+            line-height: 1.5;
         }
         textarea:focus {
             outline: none;
-            border-color: var(--vscode-focusBorder);
         }
-        .toolbar {
+        textarea::placeholder {
+            color: var(--vscode-input-placeholderForeground);
+        }
+        .input-toolbar {
             display: flex;
-            gap: 8px;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-top: 1px solid var(--vscode-widget-border);
+            background: rgba(128, 128, 128, 0.05);
+            border-radius: 0 0 12px 12px;
+        }
+        .input-hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            opacity: 0.7;
+        }
+        .input-actions {
+            display: flex;
+            gap: 6px;
             align-items: center;
         }
-        .toolbar-btn {
+        .action-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
             padding: 6px 12px;
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
             border: none;
-            border-radius: 4px;
+            border-radius: 8px;
             cursor: pointer;
             font-size: 12px;
+            font-weight: 500;
+            transition: all 0.15s ease;
         }
-        .toolbar-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+        .action-btn svg {
+            width: 14px;
+            height: 14px;
         }
         .submit-btn {
-            padding: 10px 20px;
             background: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-weight: 500;
-            margin-left: auto;
         }
         .submit-btn:hover {
             background: var(--vscode-button-hoverBackground);
+            transform: translateY(-1px);
+        }
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+        .end-btn {
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            border: 1px solid var(--vscode-widget-border);
+        }
+        .end-btn:hover {
+            background: var(--vscode-errorForeground);
+            color: white;
+            border-color: var(--vscode-errorForeground);
+        }
+        .history-btn {
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            border: 1px solid var(--vscode-widget-border);
+            padding: 6px 10px;
+        }
+        .history-btn:hover {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-foreground);
+        }
+        .history-btn.active {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border-color: var(--vscode-button-background);
+        }
+        .input-history-panel {
+            display: none;
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            right: 0;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            max-height: 280px;
+            overflow-y: auto;
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 100;
+        }
+        .input-history-panel.show {
+            display: block;
+        }
+        .input-history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--vscode-widget-border);
+            position: sticky;
+            top: 0;
+            background: var(--vscode-editor-background);
+        }
+        .input-history-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--vscode-foreground);
+        }
+        .input-history-close {
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .input-history-close:hover {
+            background: var(--vscode-button-secondaryBackground);
+        }
+        .input-history-list {
+            padding: 4px 0;
+        }
+        .input-history-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+            gap: 10px;
+        }
+        .input-history-item:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        .input-history-item .check-icon {
+            color: var(--vscode-textLink-foreground);
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+        .input-history-item .content {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 13px;
+            color: var(--vscode-foreground);
+        }
+        .input-history-item .time {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            flex-shrink: 0;
+        }
+        .input-history-item .delete-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 4px;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .input-history-item:hover .delete-btn {
+            opacity: 1;
+        }
+        .input-history-item .delete-btn:hover {
+            color: var(--vscode-errorForeground);
+        }
+        .input-history-empty {
+            padding: 20px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
         }
         .empty-state {
             display: flex;
@@ -928,12 +1137,92 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             height: 100%;
             color: var(--vscode-descriptionForeground);
             text-align: center;
+            padding: 20px;
         }
         .empty-state svg {
             width: 48px;
             height: 48px;
             margin-bottom: 12px;
             opacity: 0.5;
+        }
+        .empty-state p {
+            margin-bottom: 16px;
+        }
+        .start-chat-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .start-chat-btn:hover {
+            background: var(--vscode-button-hoverBackground);
+            transform: translateY(-1px);
+        }
+        .start-chat-btn svg {
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            opacity: 1;
+        }
+        .start-hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            margin-top: 12px;
+            opacity: 0.8;
+        }
+        .copy-success {
+            color: var(--vscode-testing-iconPassed);
+            font-size: 12px;
+            margin-top: 8px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .copy-success.show {
+            opacity: 1;
+        }
+        .workspace-info {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 6px;
+        }
+        .workspace-label {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+        .workspace-hash {
+            font-family: var(--vscode-editor-font-family);
+            font-size: 13px;
+            color: var(--vscode-textLink-foreground);
+            background: var(--vscode-textCodeBlock-background);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+        .copy-hash-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+            padding: 2px;
+        }
+        .copy-hash-btn:hover {
+            opacity: 1;
         }
         #dropZone {
             border: 2px dashed var(--vscode-widget-border);
@@ -1002,10 +1291,23 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
         </svg>
-        <p>Waiting for AI...</p>
+        <p>等待 AI 发起对话...</p>
+        <div id="workspaceInfo" class="workspace-info" style="display: none;">
+            <span class="workspace-label">路由标识：</span>
+            <code id="workspaceHashDisplay" class="workspace-hash"></code>
+            <button id="copyHashBtn" class="copy-hash-btn" title="复制哈希值">📋</button>
+        </div>
+        <button class="start-chat-btn" id="startChatBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14"/>
+            </svg>
+            开始对话
+        </button>
+        <div class="start-hint">点击复制提示词，粘贴到 AI 对话框中</div>
+        <div class="copy-success" id="copySuccess">✓ 已复制到剪贴板</div>
     </div>
 
-    <div id="feedbackArea" class="hidden" style="position: relative; display: flex; flex-direction: column; height: 100%; overflow-y: auto;">
+    <div id="feedbackArea" class="hidden" style="position: relative; flex-direction: column; height: 100%; overflow-y: auto;">
         <!-- 历史对话区域 -->
         <div id="chatHistory" class="chat-container"></div>
         
@@ -1031,12 +1333,44 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
         <div class="input-area">
             <div id="imagePreview" class="image-preview"></div>
-            <textarea 
-                id="feedbackInput" 
-                placeholder="Type your feedback, paste image (Ctrl+V)..."
-            ></textarea>
-            <div class="toolbar">
-                <button class="submit-btn" id="submitBtn">Submit</button>
+            <div class="input-wrapper">
+                <div id="inputHistoryPanel" class="input-history-panel">
+                    <div class="input-history-header">
+                        <span class="input-history-title">历史指令</span>
+                        <button class="input-history-close" id="closeHistoryPanel">×</button>
+                    </div>
+                    <div id="inputHistoryList" class="input-history-list"></div>
+                </div>
+                <textarea 
+                    id="feedbackInput" 
+                    placeholder="输入反馈内容，支持粘贴图片 (Ctrl+V)..."
+                    rows="2"
+                ></textarea>
+                <div class="input-toolbar">
+                    <div class="input-actions" style="margin-right: auto;">
+                        <button class="action-btn history-btn" id="historyBtn" title="历史指令">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polyline points="12 6 12 12 16 14"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <span class="input-hint">Enter 发送 · Ctrl+Enter 换行</span>
+                    <div class="input-actions">
+                        <button class="action-btn end-btn" id="endBtn" title="结束对话">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                            </svg>
+                            结束
+                        </button>
+                        <button class="action-btn submit-btn" id="submitBtn" title="发送反馈">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                            发送
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1065,6 +1399,150 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         let historyData = [];
         let currentRules = '';
         
+        // 工作空间信息（需要先定义，后面会用到）
+        let workspaceHash = '';
+        let workspaceName = '';
+        
+        // 输入历史记录（最多保留10条）
+        const MAX_INPUT_HISTORY = 10;
+        let inputHistory = [];
+        
+        // 从 localStorage 加载历史（使用工作空间哈希值隔离）
+        function loadInputHistory() {
+            try {
+                const key = 'inputHistory_' + (workspaceHash || 'default');
+                const saved = localStorage.getItem(key);
+                if (saved) {
+                    inputHistory = JSON.parse(saved);
+                }
+            } catch (e) {}
+        }
+        
+        // 保存历史到 localStorage
+        function saveInputHistory() {
+            try {
+                const key = 'inputHistory_' + (workspaceHash || 'default');
+                localStorage.setItem(key, JSON.stringify(inputHistory));
+            } catch (e) {}
+        }
+        
+        // 添加输入到历史
+        function addToInputHistory(text) {
+            if (!text || !text.trim()) return;
+            
+            // 移除重复项
+            inputHistory = inputHistory.filter(item => item.text !== text);
+            
+            // 添加到开头
+            inputHistory.unshift({
+                text: text,
+                timestamp: Date.now()
+            });
+            
+            // 限制数量
+            if (inputHistory.length > MAX_INPUT_HISTORY) {
+                inputHistory = inputHistory.slice(0, MAX_INPUT_HISTORY);
+            }
+            
+            saveInputHistory();
+        }
+        
+        // 删除历史项
+        function deleteInputHistoryItem(index) {
+            inputHistory.splice(index, 1);
+            saveInputHistory();
+            renderInputHistory();
+        }
+        
+        // 格式化相对时间
+        function formatRelativeTime(timestamp) {
+            const now = Date.now();
+            const diff = now - timestamp;
+            const seconds = Math.floor(diff / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+            
+            if (seconds < 60) return '刚刚';
+            if (minutes < 60) return minutes + '分钟前';
+            if (hours < 24) return hours + '小时前';
+            if (days < 7) return days + '天前';
+            return new Date(timestamp).toLocaleDateString('zh-CN');
+        }
+        
+        // 渲染历史列表
+        function renderInputHistory() {
+            const list = document.getElementById('inputHistoryList');
+            
+            if (inputHistory.length === 0) {
+                list.innerHTML = '<div class="input-history-empty">暂无历史记录</div>';
+                return;
+            }
+            
+            list.innerHTML = inputHistory.map((item, index) => \`
+                <div class="input-history-item" data-index="\${index}">
+                    <span class="check-icon">✓</span>
+                    <span class="content" title="\${item.text.replace(/"/g, '&quot;')}">\${item.text}</span>
+                    <span class="time">\${formatRelativeTime(item.timestamp)}</span>
+                    <button class="delete-btn" data-index="\${index}" title="删除">×</button>
+                </div>
+            \`).join('');
+        }
+        
+        // 历史面板元素
+        const historyBtn = document.getElementById('historyBtn');
+        const inputHistoryPanel = document.getElementById('inputHistoryPanel');
+        const closeHistoryPanel = document.getElementById('closeHistoryPanel');
+        const inputHistoryList = document.getElementById('inputHistoryList');
+        
+        // 切换历史面板
+        historyBtn.onclick = () => {
+            const isShow = inputHistoryPanel.classList.toggle('show');
+            historyBtn.classList.toggle('active', isShow);
+            if (isShow) {
+                renderInputHistory();
+            }
+        };
+        
+        // 关闭历史面板
+        closeHistoryPanel.onclick = () => {
+            inputHistoryPanel.classList.remove('show');
+            historyBtn.classList.remove('active');
+        };
+        
+        // 点击历史项填充到输入框
+        inputHistoryList.onclick = (e) => {
+            const deleteBtn = e.target.closest('.delete-btn');
+            if (deleteBtn) {
+                e.stopPropagation();
+                const index = parseInt(deleteBtn.dataset.index);
+                deleteInputHistoryItem(index);
+                return;
+            }
+            
+            const item = e.target.closest('.input-history-item');
+            if (item) {
+                const index = parseInt(item.dataset.index);
+                const historyItem = inputHistory[index];
+                if (historyItem) {
+                    feedbackInput.value = historyItem.text;
+                    feedbackInput.focus();
+                    inputHistoryPanel.classList.remove('show');
+                    historyBtn.classList.remove('active');
+                }
+            }
+        };
+        
+        // 点击面板外部关闭
+        document.addEventListener('click', (e) => {
+            if (!inputHistoryPanel.contains(e.target) && 
+                !historyBtn.contains(e.target) && 
+                inputHistoryPanel.classList.contains('show')) {
+                inputHistoryPanel.classList.remove('show');
+                historyBtn.classList.remove('active');
+            }
+        });
+        
         // 固定操作映射
         const fixedActionTexts = {
             'commitAndPush': '提交挂起的更改并推送到远程分支',
@@ -1074,6 +1552,56 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         
         // 加载已保存的 rules
         vscode.postMessage({ type: 'loadRules' });
+        
+        // 获取工作空间信息
+        vscode.postMessage({ type: 'getWorkspaceInfo' });
+        
+        // 工作空间信息元素
+        const workspaceInfo = document.getElementById('workspaceInfo');
+        const workspaceHashDisplay = document.getElementById('workspaceHashDisplay');
+        const copyHashBtn = document.getElementById('copyHashBtn');
+        
+        // 复制哈希值按钮
+        copyHashBtn.onclick = () => {
+            if (workspaceHash) {
+                vscode.postMessage({ type: 'copyToClipboard', text: workspaceHash });
+                copyHashBtn.textContent = '✓';
+                setTimeout(() => {
+                    copyHashBtn.textContent = '📋';
+                }, 1500);
+            }
+        };
+        
+        // 开始对话按钮
+        const startChatBtn = document.getElementById('startChatBtn');
+        const copySuccess = document.getElementById('copySuccess');
+        
+        startChatBtn.onclick = () => {
+            // 根据是否有哈希值生成不同的提示词
+            const startPrompt = workspaceHash 
+                ? \`使用 panel_feedback MCP 工具与我进行交互对话，workspace_hash 参数填写 "\${workspaceHash}"\`
+                : '使用 panel_feedback MCP 工具与我进行交互对话';
+            
+            // 通过 vscode API 复制到剪贴板
+            vscode.postMessage({ type: 'copyToClipboard', text: startPrompt });
+            
+            copySuccess.classList.add('show');
+            startChatBtn.innerHTML = \`
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M20 6L9 17l-5-5"/>
+                </svg>
+                已复制
+            \`;
+            setTimeout(() => {
+                copySuccess.classList.remove('show');
+                startChatBtn.innerHTML = \`
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 5v14M5 12h14"/>
+                    </svg>
+                    开始对话
+                \`;
+            }, 2000);
+        };
         
         // 固定操作按钮事件（使用事件委托）
         fixedActions.addEventListener('click', (e) => {
@@ -1208,6 +1736,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         function showMessage(message, options, history) {
             emptyState.classList.add('hidden');
             feedbackArea.classList.remove('hidden');
+            feedbackArea.style.display = 'flex';  // 确保显示为 flex
             
             // 隐藏等待提示
             const waitingDiv = document.getElementById('waitingHint');
@@ -1271,6 +1800,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             const text = feedbackInput.value.trim();
             const currentImages = [...images];
             
+            // 保存到输入历史
+            if (text) {
+                addToInputHistory(text);
+            }
+            
             // 先添加用户回复到本地历史
             addUserReplyToHistory(text, currentImages);
             
@@ -1329,7 +1863,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
         function resetToEmpty() {
             emptyState.classList.remove('hidden');
+            emptyState.style.display = 'flex';  // 确保显示
             feedbackArea.classList.add('hidden');
+            feedbackArea.style.display = 'none';  // 确保隐藏
             feedbackInput.value = '';
             images = [];
             updateImagePreview();
@@ -1484,6 +2020,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
         // 提交按钮
         submitBtn.onclick = submit;
+        
+        // 结束对话按钮
+        const endBtn = document.getElementById('endBtn');
+        endBtn.onclick = () => {
+            if (confirm('确定要结束当前对话吗？')) {
+                vscode.postMessage({ type: 'endConversation' });
+            }
+        };
 
         // 快捷键：回车发送，Cmd+回车换行
         feedbackInput.addEventListener('keydown', (e) => {
@@ -1540,6 +2084,20 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'rulesLoaded':
                     currentRules = data.rules || '';
+                    break;
+                case 'resetToEmpty':
+                    historyData = [];
+                    resetToEmpty();
+                    break;
+                case 'workspaceInfo':
+                    workspaceHash = data.workspaceHash || '';
+                    workspaceName = data.workspaceName || '';
+                    if (workspaceHash) {
+                        workspaceHashDisplay.textContent = workspaceHash;
+                        workspaceInfo.style.display = 'flex';
+                    }
+                    // 收到工作空间信息后加载历史
+                    loadInputHistory();
                     break;
             }
         });
