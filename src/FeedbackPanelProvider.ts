@@ -12,11 +12,13 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'feedbackPanel.view';
     
     private _view?: vscode.WebviewView;
+    private _editorPanel?: vscode.WebviewPanel;
     private _pendingResolve?: (value: string) => void;
     private _currentMessage: string = '';
     private _currentOptions: string[] = [];
     private _currentRequestId?: string;
     private _chatHistory: ChatMessage[] = [];
+    private _rules: string = '';
 
     constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -45,6 +47,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'clearHistory':
                     this.clearHistory();
+                    break;
+                case 'fixedAction':
+                    this._handleFixedAction(data.action, data.text);
+                    break;
+                case 'loadRules':
+                    this._loadRules();
+                    break;
+                case 'saveRules':
+                    this._saveRules(data.rules);
                     break;
                 case 'getVersion':
                     this._sendVersionInfo();
@@ -205,7 +216,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     private _handleSubmit(text: string, images: string[]) {
         if (this._pendingResolve) {
-            // 记录用户回复到历史
+            // 记录用户回复到历史（显示原始内容）
             this._chatHistory.push({
                 role: 'user',
                 content: text,
@@ -214,20 +225,85 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             });
             this._updateHistoryInView();
             
+            // 附加 rules 后发送给 AI
+            const finalText = this._appendRules(text);
             const result = images.length > 0 
-                ? JSON.stringify({ text, images })
-                : text;
+                ? JSON.stringify({ text: finalText, images })
+                : finalText;
             this._pendingResolve(result);
             this._pendingResolve = undefined;
         }
     }
+
+    private _handleFixedAction(action: string, text: string) {
+        // 固定操作直接作为用户输入提交
+        if (this._pendingResolve) {
+            const finalText = this._appendRules(text);
+            this._chatHistory.push({
+                role: 'user',
+                content: text,
+                timestamp: Date.now()
+            });
+            this._updateHistoryInView();
+            this._pendingResolve(finalText);
+            this._pendingResolve = undefined;
+        }
+    }
+
+    private _appendRules(text: string): string {
+        if (this._rules) {
+            return `${text}\n\n---\n[Rules/Memory]:\n${this._rules}`;
+        }
+        return text;
+    }
+
+    private _loadRules() {
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const rulesFile = path.join(os.homedir(), '.panel-feedback', 'rules.txt');
+        
+        try {
+            if (fs.existsSync(rulesFile)) {
+                this._rules = fs.readFileSync(rulesFile, 'utf-8');
+            }
+        } catch (e) {
+            console.error('Failed to load rules:', e);
+        }
+        
+        const msgData = { type: 'rulesLoaded', rules: this._rules };
+        this._view?.webview.postMessage(msgData);
+        this._editorPanel?.webview.postMessage(msgData);
+    }
+
+    private _saveRules(rules: string) {
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const rulesDir = path.join(os.homedir(), '.panel-feedback');
+        const rulesFile = path.join(rulesDir, 'rules.txt');
+        
+        try {
+            if (!fs.existsSync(rulesDir)) {
+                fs.mkdirSync(rulesDir, { recursive: true });
+            }
+            fs.writeFileSync(rulesFile, rules, 'utf-8');
+            this._rules = rules;
+        } catch (e) {
+            console.error('Failed to save rules:', e);
+        }
+    }
     
     private _updateHistoryInView() {
+        const msgData = {
+            type: 'updateHistory',
+            history: this._chatHistory
+        };
         if (this._view) {
-            this._view.webview.postMessage({
-                type: 'updateHistory',
-                history: this._chatHistory
-            });
+            this._view.webview.postMessage(msgData);
+        }
+        if (this._editorPanel) {
+            this._editorPanel.webview.postMessage(msgData);
         }
     }
     
@@ -237,8 +313,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     public openSettings() {
-        if (this._view) {
-            this._view.webview.postMessage({ type: 'openSettings' });
+        const msgData = { type: 'openSettings' };
+        if (this._editorPanel?.visible) {
+            this._editorPanel.webview.postMessage(msgData);
+        } else if (this._view) {
+            this._view.webview.postMessage(msgData);
         }
     }
 
@@ -254,22 +333,30 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             timestamp: Date.now()
         });
 
-        // 如果 webview 未初始化，先打开面板
-        if (!this._view) {
-            await vscode.commands.executeCommand('feedbackPanel.view.focus');
-            // 等待 webview 初始化
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
+        const msgData = {
+            type: 'showMessage',
+            message: message,
+            options: options || [],
+            history: this._chatHistory
+        };
 
-        if (this._view) {
-            // false = 不保留焦点，让面板获得焦点
-            this._view.show?.(false);
-            this._view.webview.postMessage({
-                type: 'showMessage',
-                message: message,
-                options: options || [],
-                history: this._chatHistory
-            });
+        // 优先使用编辑器面板
+        if (this._editorPanel) {
+            this._editorPanel.reveal();
+            this._editorPanel.webview.postMessage(msgData);
+        } else {
+            // 如果 webview 未初始化，先打开面板
+            if (!this._view) {
+                await vscode.commands.executeCommand('feedbackPanel.view.focus');
+                // 等待 webview 初始化
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            if (this._view) {
+                // false = 不保留焦点，让面板获得焦点
+                this._view.show?.(false);
+                this._view.webview.postMessage(msgData);
+            }
         }
 
         return new Promise((resolve) => {
@@ -281,6 +368,78 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             this._view.webview.postMessage({ type: 'triggerSubmit' });
         }
+        if (this._editorPanel) {
+            this._editorPanel.webview.postMessage({ type: 'triggerSubmit' });
+        }
+    }
+
+    public openInEditor(context: vscode.ExtensionContext) {
+        // 如果已经打开，直接显示
+        if (this._editorPanel) {
+            this._editorPanel.reveal();
+            return;
+        }
+
+        // 创建新的 WebviewPanel
+        this._editorPanel = vscode.window.createWebviewPanel(
+            'feedbackPanel.editor',
+            '💬 Panel Feedback',
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true,
+                localResourceRoots: [this._extensionUri]
+            }
+        );
+
+        this._editorPanel.webview.html = this._getHtmlForWebview(this._editorPanel.webview);
+
+        // 监听消息
+        this._editorPanel.webview.onDidReceiveMessage(data => {
+            switch (data.type) {
+                case 'submit':
+                    this._handleSubmit(data.value, data.images);
+                    break;
+                case 'optionSelected':
+                    this._handleSubmit(data.value, []);
+                    break;
+                case 'clearHistory':
+                    this.clearHistory();
+                    break;
+                case 'fixedAction':
+                    this._handleFixedAction(data.action, data.text);
+                    break;
+                case 'loadRules':
+                    this._loadRules();
+                    break;
+                case 'saveRules':
+                    this._saveRules(data.rules);
+                    break;
+            }
+        }, undefined, context.subscriptions);
+
+        // 监听关闭事件
+        this._editorPanel.onDidDispose(() => {
+            this._editorPanel = undefined;
+        }, undefined, context.subscriptions);
+
+        // 同步当前状态
+        if (this._chatHistory.length > 0) {
+            this._editorPanel.webview.postMessage({
+                type: 'showMessage',
+                message: this._currentMessage,
+                options: this._currentOptions,
+                history: this._chatHistory
+            });
+        }
+    }
+
+    // 获取当前活跃的 webview
+    private _getActiveWebview(): vscode.Webview | undefined {
+        if (this._editorPanel?.visible) {
+            return this._editorPanel.webview;
+        }
+        return this._view?.webview;
     }
 
     private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -389,12 +548,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             background: var(--vscode-editor-background);
             border: 1px solid var(--vscode-widget-border);
             border-radius: 8px;
-            padding: 20px;
-            min-width: 280px;
-            max-width: 90%;
+            padding: 16px;
+            width: 90%;
+            max-width: 360px;
+            max-height: 85%;
+            overflow-y: auto;
         }
         .settings-title {
-            font-size: 16px;
+            font-size: 14px;
             font-weight: bold;
             margin-bottom: 16px;
             display: flex;
@@ -412,29 +573,83 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .settings-close:hover {
             opacity: 1;
         }
-        .settings-item {
-            padding: 10px 0;
+        .settings-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 12px;
             border-bottom: 1px solid var(--vscode-widget-border);
+            padding-bottom: 8px;
         }
-        .settings-item:last-child {
-            border-bottom: none;
+        .settings-tab {
+            padding: 6px 12px;
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .settings-tab:hover {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-foreground);
+        }
+        .settings-tab.active {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        .settings-tab-content {
+            min-height: 120px;
+        }
+        .settings-tab-content.hidden {
+            display: none;
+        }
+        .settings-hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            margin-bottom: 8px;
+        }
+        .settings-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            font-size: 12px;
         }
         .settings-version {
             color: var(--vscode-descriptionForeground);
-            font-size: 12px;
+            font-size: 11px;
         }
         .settings-action {
-            padding: 8px 16px;
+            padding: 6px 12px;
             background: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
             border: none;
             border-radius: 4px;
             cursor: pointer;
             width: 100%;
-            margin-top: 8px;
+            margin-top: 6px;
+            font-size: 12px;
         }
         .settings-action:hover {
             background: var(--vscode-button-hoverBackground);
+        }
+        .rules-textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 8px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            resize: vertical;
+            font-family: inherit;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        .rules-textarea:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
         }
         .current-question {
             background: var(--vscode-editor-background);
@@ -472,24 +687,157 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-testing-iconPassed);
             border-color: var(--vscode-testing-iconPassed);
         }
-        .options-container {
+        .rules-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .rules-modal.show {
             display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
+        }
+        .rules-content {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            padding: 16px;
+            width: 90%;
+            max-width: 400px;
+            max-height: 80%;
+            display: flex;
+            flex-direction: column;
+        }
+        .rules-title {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .rules-close {
+            background: none;
+            border: none;
+            font-size: 18px;
+            cursor: pointer;
+            color: var(--vscode-foreground);
+            opacity: 0.7;
+        }
+        .rules-close:hover {
+            opacity: 1;
+        }
+        .rules-textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 10px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            resize: vertical;
+            font-family: inherit;
+            font-size: 12px;
             margin-bottom: 12px;
         }
-        .option-btn {
+        .rules-textarea:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+        }
+        .rules-hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            margin-bottom: 12px;
+        }
+        .rules-save {
             padding: 8px 16px;
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
             border: none;
             border-radius: 4px;
             cursor: pointer;
+            align-self: flex-end;
+        }
+        .rules-save:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .options-container {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+            padding: 10px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 6px;
+        }
+        .options-title {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            margin-bottom: 4px;
+        }
+        .option-btn {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: transparent;
+            color: var(--vscode-foreground);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 4px;
+            cursor: pointer;
             font-size: 13px;
-            transition: background 0.2s;
+            text-align: left;
+            transition: all 0.15s;
         }
         .option-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--vscode-list-hoverBackground);
+            border-color: var(--vscode-focusBorder);
+        }
+        .option-btn .option-key {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .option-btn .option-text {
+            flex: 1;
+        }
+        .fixed-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+            padding-bottom: 10px;
+            border-bottom: 1px dashed var(--vscode-widget-border);
+        }
+        .fixed-action-btn {
+            padding: 4px 10px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .fixed-action-btn:hover {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            transform: scale(1.02);
         }
         .input-area {
             display: flex;
@@ -629,18 +977,23 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     <div id="settingsModal" class="settings-modal">
         <div class="settings-content">
             <div class="settings-title">
-                <span>⚙️ About</span>
+                <span>⚙️ 设置</span>
                 <button class="settings-close" id="closeSettings">×</button>
             </div>
-            <div class="settings-item">
-                <div><strong>Panel Feedback</strong></div>
-                <div class="settings-version" id="versionText">Version: loading...</div>
+            
+            <div class="settings-tabs">
+                <button class="settings-tab active" data-tab="rules">📝 Rules</button>
+                <button class="settings-tab" data-tab="actions">⚡ 快捷操作</button>
             </div>
-            <div class="settings-item">
-                <button class="settings-action" id="checkUpdateBtn">🔄 Check for Updates</button>
+            
+            <div class="settings-tab-content" id="tab-rules">
+                <div class="settings-hint">每次提交反馈时会自动附加这些内容给 AI</div>
+                <textarea id="rulesTextarea" class="rules-textarea" placeholder="例如：&#10;- 使用中文回复&#10;- 代码要有注释&#10;- 修改前先确认"></textarea>
+                <button class="settings-action" id="saveRules">💾 保存</button>
             </div>
-            <div class="settings-item">
-                <a href="https://github.com/fhyfhy17/panel-feedback" style="color: var(--vscode-textLink-foreground);">GitHub Repository</a>
+            
+            <div class="settings-tab-content hidden" id="tab-actions">
+                <div class="settings-hint">管理固定的快捷操作按钮（开发中）</div>
             </div>
         </div>
     </div>
@@ -663,10 +1016,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             <div id="messageContent" class="message"></div>
         </div>
         
+        <!-- 固定操作按钮 -->
+        <div class="fixed-actions" id="fixedActions" style="display: none;">
+            <button class="fixed-action-btn" data-action="commitAndPush" title="提交挂起的更改并推送到远程分支">🚀 提交并推送</button>
+            <button class="fixed-action-btn" data-action="codeReview" title="审查当前更改的代码">🔍 代码审查</button>
+            <button class="fixed-action-btn" data-action="formatCode" title="整理代码格式和排序">📐 整理格式</button>
+        </div>
+        
         <div id="optionsContainer" class="options-container"></div>
         
         <div id="dropZone">
-            📷 Drop or paste image here
+            📎 拖拽图片或文件/文件夹到这里
         </div>
 
         <div class="input-area">
@@ -694,9 +1054,68 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                         const dropZone = document.getElementById('dropZone');
         const chatHistory = document.getElementById('chatHistory');
         const currentQuestion = document.getElementById('currentQuestion');
+        const fixedActions = document.getElementById('fixedActions');
+        const settingsModal = document.getElementById('settingsModal');
+        const closeSettings = document.getElementById('closeSettings');
+        const rulesTextarea = document.getElementById('rulesTextarea');
+        const saveRules = document.getElementById('saveRules');
+        const settingsTabs = document.querySelectorAll('.settings-tab');
 
         let images = [];
         let historyData = [];
+        let currentRules = '';
+        
+        // 固定操作映射
+        const fixedActionTexts = {
+            'commitAndPush': '提交挂起的更改并推送到远程分支',
+            'codeReview': '审查当前更改的代码，检查潜在问题和改进建议',
+            'formatCode': '整理当前文件的代码格式：1. 按执行顺序排列代码 2. 相同类型的代码归类在一起（如常量、变量、函数、类等）3. 清除没有引用的代码 4. 所有对象引用都使用 using 语句 5. 保持逻辑清晰的代码结构'
+        };
+        
+        // 加载已保存的 rules
+        vscode.postMessage({ type: 'loadRules' });
+        
+        // 固定操作按钮事件（使用事件委托）
+        fixedActions.addEventListener('click', (e) => {
+            const btn = e.target.closest('.fixed-action-btn');
+            if (btn) {
+                const action = btn.dataset.action;
+                const text = fixedActionTexts[action] || action;
+                // 和选项点击保持一致：添加到历史并显示等待状态
+                addUserReplyToHistory(text, []);
+                vscode.postMessage({ 
+                    type: 'fixedAction', 
+                    action: action,
+                    text: text
+                });
+                showWaitingState();
+            }
+        });
+        
+        // 设置弹窗事件
+        closeSettings.addEventListener('click', () => {
+            settingsModal.classList.remove('show');
+        });
+        
+        // Tab 切换
+        settingsTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                settingsTabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.add('hidden'));
+                document.getElementById('tab-' + tabName).classList.remove('hidden');
+            });
+        });
+        
+        saveRules.addEventListener('click', () => {
+            currentRules = rulesTextarea.value.trim();
+            vscode.postMessage({ type: 'saveRules', rules: currentRules });
+            saveRules.textContent = '✅ 已保存';
+            setTimeout(() => {
+                saveRules.textContent = '💾 保存';
+            }, 1500);
+        });
         
         // 1秒闪烁效果
         function showNewMessageHighlight() {
@@ -797,6 +1216,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             // 显示当前问题和输入区
             currentQuestion.style.display = 'block';
             document.querySelector('.input-area').style.display = 'flex';
+            fixedActions.style.display = 'flex';  // 显示固定操作
             
             // 渲染历史
             if (history && history.length > 0) {
@@ -815,13 +1235,22 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             // 渲染选项按钮
             optionsContainer.innerHTML = '';
             if (options && options.length > 0) {
-                options.forEach(opt => {
+                const title = document.createElement('div');
+                title.className = 'options-title';
+                title.textContent = '选择一个选项：';
+                optionsContainer.appendChild(title);
+                
+                options.forEach((opt, idx) => {
                     const btn = document.createElement('button');
                     btn.className = 'option-btn';
-                    btn.textContent = opt;
+                    const keyLabel = String.fromCharCode(65 + idx); // A, B, C...
+                    btn.innerHTML = '<span class="option-key">' + keyLabel + '</span><span class="option-text">' + opt + '</span>';
                     btn.onclick = () => selectOption(opt);
                     optionsContainer.appendChild(btn);
                 });
+                optionsContainer.style.display = 'flex';
+            } else {
+                optionsContainer.style.display = 'none';
             }
             
             feedbackInput.value = '';
@@ -874,7 +1303,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             // 隐藏当前问题和输入区，但保留历史
             currentQuestion.style.display = 'none';
             optionsContainer.innerHTML = '';
+            optionsContainer.style.display = 'none';
             document.querySelector('.input-area').style.display = 'none';
+            fixedActions.style.display = 'none';  // 隐藏固定操作
             
             // 如果没有历史，则显示空状态
             if (historyData.length <= 1) {
@@ -944,10 +1375,29 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        // 拖拽处理
+        // 拖拽处理 - 只有拖拽图片时才显示提示区域
+        let dragHasImage = false;
+        
         document.addEventListener('dragover', (e) => {
             e.preventDefault();
-            dropZone.classList.add('active');
+            // 检查是否包含图片
+            const types = e.dataTransfer?.types || [];
+            const items = e.dataTransfer?.items;
+            dragHasImage = false;
+            
+            if (items) {
+                for (let i = 0; i < items.length; i++) {
+                    if (items[i].type.startsWith('image/')) {
+                        dragHasImage = true;
+                        break;
+                    }
+                }
+            }
+            
+            // 只有图片才显示拖拽区域
+            if (dragHasImage) {
+                dropZone.classList.add('active');
+            }
         });
 
         document.addEventListener('dragleave', () => {
@@ -959,14 +1409,76 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             dropZone.classList.remove('active');
             
             const files = e.dataTransfer?.files;
-            if (files) {
+            const items = e.dataTransfer?.items;
+            
+            // 调试：打印拖拽数据
+            console.log('Drop event:', {
+                filesCount: files?.length,
+                itemsCount: items?.length,
+                types: e.dataTransfer?.types
+            });
+            
+            // 尝试获取 text/uri-list（VS Code 资源管理器拖拽）
+            const uriList = e.dataTransfer?.getData('text/uri-list');
+            const textPlain = e.dataTransfer?.getData('text/plain');
+            console.log('URI List:', uriList);
+            console.log('Text Plain:', textPlain);
+            
+            // 优先使用 URI list
+            if (uriList) {
+                const paths = uriList.split('\\n')
+                    .filter(uri => uri.trim())
+                    .map(uri => {
+                        // 转换 file:// URI 为路径
+                        if (uri.startsWith('file://')) {
+                            return decodeURIComponent(uri.replace('file:///', '').replace('file://', ''));
+                        }
+                        return uri;
+                    });
+                
+                if (paths.length > 0) {
+                    const pathText = paths.map(p => '\`' + p + '\`').join(' ');
+                    const currentText = feedbackInput.value;
+                    const cursorPos = feedbackInput.selectionStart;
+                    const before = currentText.substring(0, cursorPos);
+                    const after = currentText.substring(cursorPos);
+                    feedbackInput.value = before + pathText + after;
+                    feedbackInput.focus();
+                    feedbackInput.selectionStart = feedbackInput.selectionEnd = cursorPos + pathText.length;
+                    return;
+                }
+            }
+            
+            // 回退：处理文件
+            if (files && files.length > 0) {
+                const paths = [];
+                let hasImage = false;
+                
                 Array.from(files).forEach(file => {
+                    console.log('File:', { name: file.name, type: file.type, path: file.path });
+                    
                     if (file.type.startsWith('image/')) {
+                        hasImage = true;
                         const reader = new FileReader();
                         reader.onload = () => addImage(reader.result);
                         reader.readAsDataURL(file);
+                    } else if (file.path) {
+                        paths.push(file.path);
+                    } else if (file.name) {
+                        paths.push(file.name);
                     }
                 });
+                
+                if (paths.length > 0 && !hasImage) {
+                    const pathText = paths.map(p => '\`' + p + '\`').join(' ');
+                    const currentText = feedbackInput.value;
+                    const cursorPos = feedbackInput.selectionStart;
+                    const before = currentText.substring(0, cursorPos);
+                    const after = currentText.substring(cursorPos);
+                    feedbackInput.value = before + pathText + after;
+                    feedbackInput.focus();
+                    feedbackInput.selectionStart = feedbackInput.selectionEnd = cursorPos + pathText.length;
+                }
             }
         });
 
@@ -1000,26 +1512,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             });
         };
 
-        // 设置弹窗
-        const settingsModal = document.getElementById('settingsModal');
-        const closeSettings = document.getElementById('closeSettings');
-        const checkUpdateBtn = document.getElementById('checkUpdateBtn');
-        const versionText = document.getElementById('versionText');
-
-        closeSettings.onclick = () => {
-            settingsModal.classList.remove('show');
-        };
-
+        // 点击弹窗外部关闭
         settingsModal.onclick = (e) => {
             if (e.target === settingsModal) {
                 settingsModal.classList.remove('show');
             }
-        };
-
-        checkUpdateBtn.onclick = () => {
-            checkUpdateBtn.textContent = '🔄 Checking...';
-            checkUpdateBtn.disabled = true;
-            vscode.postMessage({ type: 'checkUpdate' });
         };
 
         // 监听来自扩展的消息
@@ -1037,23 +1534,12 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     // 更新历史时显示全部（包括最新用户回复）
                     renderHistory(historyData, true);
                     break;
-                case 'versionInfo':
-                    versionText.textContent = 'Version: ' + data.version;
-                    break;
-                case 'updateResult':
-                    checkUpdateBtn.disabled = false;
-                    if (data.hasUpdate) {
-                        checkUpdateBtn.textContent = '🎉 v' + data.latestVersion + ' available!';
-                    } else {
-                        checkUpdateBtn.textContent = '✅ Up to date';
-                        setTimeout(() => {
-                            checkUpdateBtn.textContent = '🔄 Check for Updates';
-                        }, 3000);
-                    }
-                    break;
                 case 'openSettings':
+                    rulesTextarea.value = currentRules;
                     settingsModal.classList.add('show');
-                    vscode.postMessage({ type: 'getVersion' });
+                    break;
+                case 'rulesLoaded':
+                    currentRules = data.rules || '';
                     break;
             }
         });

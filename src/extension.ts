@@ -250,6 +250,13 @@ export function activate(context: vscode.ExtensionContext) {
             provider.clearHistory();
         })
     );
+
+    // 在编辑器中打开
+    context.subscriptions.push(
+        vscode.commands.registerCommand('feedbackPanel.openInEditor', () => {
+            provider.openInEditor(context);
+        })
+    );
 }
 
 export function deactivate() {

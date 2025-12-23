@@ -2,7 +2,7 @@
   "name": "windsurf-feedback-panel",
   "displayName": "Windsurf Feedback Panel",
   "description": "侧边栏交互反馈面板，支持 MCP 协议",
-  "version": "1.4.9",
+  "version": "2.0.0",
   "publisher": "fhyfhy17",
   "repository": {
     "type": "git",
@@ -55,10 +55,20 @@
         "command": "feedbackPanel.clearHistory",
         "title": "Clear History",
         "icon": "$(trash)"
+      },
+      {
+        "command": "feedbackPanel.openInEditor",
+        "title": "Panel Feedback: 在编辑器中打开",
+        "icon": "$(link-external)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "feedbackPanel.openInEditor",
+          "when": "view == feedbackPanel.view",
+          "group": "navigation@0"
+        },
         {
           "command": "feedbackPanel.clearHistory",
           "when": "view == feedbackPanel.view",
