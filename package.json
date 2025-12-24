@@ -67,25 +67,6 @@
         "title": "Panel Feedback: 打开面板"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "feedbackPanel.openInEditor",
-          "when": "view == feedbackPanel.view",
-          "group": "navigation@0"
-        },
-        {
-          "command": "feedbackPanel.clearHistory",
-          "when": "view == feedbackPanel.view",
-          "group": "navigation@1"
-        },
-        {
-          "command": "feedbackPanel.openSettings",
-          "when": "view == feedbackPanel.view",
-          "group": "navigation@2"
-        }
-      ]
-    },
     "configuration": {
       "title": "Panel Feedback",
       "properties": {

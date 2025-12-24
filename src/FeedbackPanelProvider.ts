@@ -8,6 +8,12 @@ interface ChatMessage {
     images?: string[];
 }
 
+interface InputHistoryItem {
+    text: string;
+    timestamp: number;
+    pinned: boolean;
+}
+
 export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'feedbackPanel.view';
     
@@ -22,6 +28,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _workspaceHash: string = '';  // 工作空间哈希值
     private _workspaceName: string = '';  // 工作空间名称
     private _onEndConversation?: () => void;  // 结束对话回调
+    private _inputHistory: InputHistoryItem[] = [];  // 输入历史记录
+    private static readonly MAX_INPUT_HISTORY = 10;  // 最大历史记录数
 
     constructor(private readonly _extensionUri: vscode.Uri) {
         // 生成工作空间哈希值
@@ -48,7 +56,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this._extensionUri]
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, false);
 
         // 侧边栏视图变为可见时，自动打开 tab 页
         webviewView.onDidChangeVisibility(() => {
@@ -101,6 +109,23 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'getWorkspaceFiles':
                     this._handleGetWorkspaceFiles(data.query || '');
+                    break;
+                case 'openInEditor':
+                    if (this._extensionContext) {
+                        this.openInEditor(this._extensionContext);
+                    }
+                    break;
+                case 'loadInputHistory':
+                    this._loadInputHistory();
+                    break;
+                case 'addInputHistory':
+                    this._addInputHistory(data.text);
+                    break;
+                case 'deleteInputHistory':
+                    this._deleteInputHistory(data.index);
+                    break;
+                case 'togglePinInputHistory':
+                    this._togglePinInputHistory(data.index);
                     break;
             }
         });
@@ -464,6 +489,119 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             console.error('Failed to save rules:', e);
         }
     }
+
+    // ========== 输入历史管理 ==========
+    
+    private _getInputHistoryFilePath(): string {
+        const os = require('os');
+        const path = require('path');
+        const historyDir = path.join(os.homedir(), '.panel-feedback');
+        return this._workspaceHash 
+            ? path.join(historyDir, `input-history-${this._workspaceHash}.json`)
+            : path.join(historyDir, 'input-history.json');
+    }
+
+    private _loadInputHistory() {
+        const fs = require('fs');
+        const historyFile = this._getInputHistoryFilePath();
+        
+        try {
+            if (fs.existsSync(historyFile)) {
+                const data = fs.readFileSync(historyFile, 'utf-8');
+                this._inputHistory = JSON.parse(data);
+            }
+        } catch (e) {
+            console.error('Failed to load input history:', e);
+            this._inputHistory = [];
+        }
+        
+        this._syncInputHistoryToAllWebviews();
+    }
+
+    private _saveInputHistory() {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const historyDir = path.join(os.homedir(), '.panel-feedback');
+        const historyFile = this._getInputHistoryFilePath();
+        
+        try {
+            if (!fs.existsSync(historyDir)) {
+                fs.mkdirSync(historyDir, { recursive: true });
+            }
+            fs.writeFileSync(historyFile, JSON.stringify(this._inputHistory), 'utf-8');
+        } catch (e) {
+            console.error('Failed to save input history:', e);
+        }
+    }
+
+    private _addInputHistory(text: string) {
+        if (!text || !text.trim()) return;
+        
+        // 检查是否已存在
+        const existingIndex = this._inputHistory.findIndex(item => item.text === text);
+        if (existingIndex !== -1) {
+            const existing = this._inputHistory[existingIndex];
+            this._inputHistory.splice(existingIndex, 1);
+            existing.timestamp = Date.now();
+            // 置顶项保持在最前面，非置顶项插入到置顶项之后
+            if (existing.pinned) {
+                this._inputHistory.unshift(existing);
+            } else {
+                const firstNonPinnedIndex = this._inputHistory.findIndex(item => !item.pinned);
+                if (firstNonPinnedIndex === -1) {
+                    this._inputHistory.push(existing);
+                } else {
+                    this._inputHistory.splice(firstNonPinnedIndex, 0, existing);
+                }
+            }
+        } else {
+            // 新项插入到置顶项之后
+            const newItem: InputHistoryItem = { text, timestamp: Date.now(), pinned: false };
+            const firstNonPinnedIndex = this._inputHistory.findIndex(item => !item.pinned);
+            if (firstNonPinnedIndex === -1) {
+                this._inputHistory.push(newItem);
+            } else {
+                this._inputHistory.splice(firstNonPinnedIndex, 0, newItem);
+            }
+        }
+        
+        // 限制数量：置顶项不计入限制
+        const pinnedItems = this._inputHistory.filter(item => item.pinned);
+        const nonPinnedItems = this._inputHistory.filter(item => !item.pinned);
+        if (nonPinnedItems.length > FeedbackPanelProvider.MAX_INPUT_HISTORY) {
+            this._inputHistory = [...pinnedItems, ...nonPinnedItems.slice(0, FeedbackPanelProvider.MAX_INPUT_HISTORY)];
+        }
+        
+        this._saveInputHistory();
+        this._syncInputHistoryToAllWebviews();
+    }
+
+    private _deleteInputHistory(index: number) {
+        if (index >= 0 && index < this._inputHistory.length) {
+            this._inputHistory.splice(index, 1);
+            this._saveInputHistory();
+            this._syncInputHistoryToAllWebviews();
+        }
+    }
+
+    private _togglePinInputHistory(index: number) {
+        if (index >= 0 && index < this._inputHistory.length) {
+            this._inputHistory[index].pinned = !this._inputHistory[index].pinned;
+            // 重新排序：置顶项在前
+            const pinnedItems = this._inputHistory.filter(item => item.pinned);
+            const nonPinnedItems = this._inputHistory.filter(item => !item.pinned);
+            this._inputHistory = [...pinnedItems, ...nonPinnedItems];
+            this._saveInputHistory();
+            this._syncInputHistoryToAllWebviews();
+        }
+    }
+
+    private _syncInputHistoryToAllWebviews() {
+        const msgData = { type: 'inputHistoryLoaded', inputHistory: this._inputHistory };
+        this._view?.webview.postMessage(msgData);
+        this._editorPanel?.webview.postMessage(msgData);
+    }
     
     private _updateHistoryInView() {
         const msgData = {
@@ -615,7 +753,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
         );
 
-        this._editorPanel.webview.html = this._getHtmlForWebview(this._editorPanel.webview);
+        this._editorPanel.webview.html = this._getHtmlForWebview(this._editorPanel.webview, true);
 
         // 监听消息
         this._editorPanel.webview.onDidReceiveMessage(data => {
@@ -656,6 +794,18 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'getWorkspaceFiles':
                     this._handleGetWorkspaceFiles(data.query || '');
                     break;
+                case 'loadInputHistory':
+                    this._loadInputHistory();
+                    break;
+                case 'addInputHistory':
+                    this._addInputHistory(data.text);
+                    break;
+                case 'deleteInputHistory':
+                    this._deleteInputHistory(data.index);
+                    break;
+                case 'togglePinInputHistory':
+                    this._togglePinInputHistory(data.index);
+                    break;
             }
         }, undefined, context.subscriptions);
 
@@ -683,7 +833,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         return this._view?.webview;
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview): string {
+    private _getHtmlForWebview(webview: vscode.Webview, isEditorPanel: boolean = false): string {
         // 获取配置的最小宽度
         const config = vscode.workspace.getConfiguration('feedbackPanel');
         const minWidth = config.get<number>('minWidth', 280);
@@ -705,11 +855,54 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             font-size: var(--vscode-font-size);
             color: var(--vscode-foreground);
             background: var(--vscode-sideBar-background);
-            padding: 12px;
+            padding: 0;
             height: 100vh;
             display: flex;
             flex-direction: column;
             min-width: ${minWidth}px;
+        }
+        .top-toolbar {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 12px;
+            background: rgba(var(--vscode-sideBar-background), 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--vscode-widget-border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .toolbar-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            color: var(--vscode-foreground);
+            opacity: 0.7;
+            transition: all 0.15s ease;
+        }
+        .toolbar-btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        .toolbar-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 12px;
+            overflow: hidden;
         }
         html {
             min-width: ${minWidth}px;
@@ -1638,6 +1831,33 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     </style>
 </head>
 <body>
+    <!-- 顶部工具栏 -->
+    <div class="top-toolbar">
+        <button class="toolbar-btn" id="openTabBtn" title="在编辑器中打开" style="display: ${isEditorPanel ? 'none' : 'flex'};">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+            </svg>
+        </button>
+        <button class="toolbar-btn" id="clearHistoryBtn" title="清除历史">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18"></path>
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
+                <line x1="10" y1="11" x2="10" y2="17"></line>
+                <line x1="14" y1="11" x2="14" y2="17"></line>
+            </svg>
+        </button>
+        <button class="toolbar-btn" id="settingsBtn" title="设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+        </button>
+    </div>
+
+    <div class="main-content">
     <div id="settingsModal" class="settings-modal">
         <div class="settings-content">
             <div class="settings-title">
@@ -1769,6 +1989,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const rulesTextarea = document.getElementById('rulesTextarea');
         const saveRules = document.getElementById('saveRules');
         const settingsTabs = document.querySelectorAll('.settings-tab');
+        const openTabBtn = document.getElementById('openTabBtn');
+        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+        const settingsBtn = document.getElementById('settingsBtn');
 
         let images = [];
         let historyData = [];
@@ -1778,89 +2001,28 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         let workspaceHash = '';
         let workspaceName = '';
         
-        // 输入历史记录（最多保留10条）
-        const MAX_INPUT_HISTORY = 10;
+        // 输入历史记录（由后端统一管理）
         let inputHistory = [];
         
-        // 从 localStorage 加载历史（使用工作空间哈希值隔离）
+        // 从后端加载历史
         function loadInputHistory() {
-            try {
-                const key = 'inputHistory_' + (workspaceHash || 'default');
-                const saved = localStorage.getItem(key);
-                if (saved) {
-                    inputHistory = JSON.parse(saved);
-                }
-            } catch (e) {}
+            vscode.postMessage({ type: 'loadInputHistory' });
         }
         
-        // 保存历史到 localStorage
-        function saveInputHistory() {
-            try {
-                const key = 'inputHistory_' + (workspaceHash || 'default');
-                localStorage.setItem(key, JSON.stringify(inputHistory));
-            } catch (e) {}
-        }
-        
-        // 添加输入到历史
+        // 添加输入到历史（通知后端）
         function addToInputHistory(text) {
             if (!text || !text.trim()) return;
-            
-            // 检查是否已存在（保留置顶状态）
-            const existingIndex = inputHistory.findIndex(item => item.text === text);
-            if (existingIndex !== -1) {
-                const existing = inputHistory[existingIndex];
-                inputHistory.splice(existingIndex, 1);
-                existing.timestamp = Date.now();
-                // 置顶项保持在最前面，非置顶项插入到置顶项之后
-                if (existing.pinned) {
-                    inputHistory.unshift(existing);
-                } else {
-                    const firstNonPinnedIndex = inputHistory.findIndex(item => !item.pinned);
-                    if (firstNonPinnedIndex === -1) {
-                        inputHistory.push(existing);
-                    } else {
-                        inputHistory.splice(firstNonPinnedIndex, 0, existing);
-                    }
-                }
-            } else {
-                // 新项插入到置顶项之后
-                const newItem = { text: text, timestamp: Date.now(), pinned: false };
-                const firstNonPinnedIndex = inputHistory.findIndex(item => !item.pinned);
-                if (firstNonPinnedIndex === -1) {
-                    inputHistory.push(newItem);
-                } else {
-                    inputHistory.splice(firstNonPinnedIndex, 0, newItem);
-                }
-            }
-            
-            // 限制数量：置顶项不计入限制
-            const pinnedItems = inputHistory.filter(item => item.pinned);
-            const nonPinnedItems = inputHistory.filter(item => !item.pinned);
-            if (nonPinnedItems.length > MAX_INPUT_HISTORY) {
-                inputHistory = [...pinnedItems, ...nonPinnedItems.slice(0, MAX_INPUT_HISTORY)];
-            }
-            
-            saveInputHistory();
+            vscode.postMessage({ type: 'addInputHistory', text: text });
         }
         
-        // 切换置顶状态
+        // 切换置顶状态（通知后端）
         function togglePinItem(index) {
-            if (inputHistory[index]) {
-                inputHistory[index].pinned = !inputHistory[index].pinned;
-                // 重新排序：置顶项在前
-                const pinnedItems = inputHistory.filter(item => item.pinned);
-                const nonPinnedItems = inputHistory.filter(item => !item.pinned);
-                inputHistory = [...pinnedItems, ...nonPinnedItems];
-                saveInputHistory();
-                renderInputHistory();
-            }
+            vscode.postMessage({ type: 'togglePinInputHistory', index: index });
         }
         
-        // 删除历史项
+        // 删除历史项（通知后端）
         function deleteInputHistoryItem(index) {
-            inputHistory.splice(index, 1);
-            saveInputHistory();
-            renderInputHistory();
+            vscode.postMessage({ type: 'deleteInputHistory', index: index });
         }
         
         // 格式化相对时间
@@ -2272,6 +2434,22 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 });
                 showWaitingState();
             }
+        });
+        
+        // 工具栏按钮事件
+        if (openTabBtn) {
+            openTabBtn.addEventListener('click', () => {
+                vscode.postMessage({ type: 'openInEditor' });
+            });
+        }
+        
+        clearHistoryBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'clearHistory' });
+        });
+        
+        settingsBtn.addEventListener('click', () => {
+            rulesTextarea.value = currentRules;
+            settingsModal.classList.add('show');
         });
         
         // 设置弹窗事件
@@ -2784,9 +2962,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                         feedbackInput.selectionStart = feedbackInput.selectionEnd = cursorPos + pathText.length + 1;
                     }
                     break;
+                case 'inputHistoryLoaded':
+                    // 接收后端同步的输入历史
+                    inputHistory = data.inputHistory || [];
+                    renderInputHistory();
+                    break;
             }
         });
     </script>
+</div>
 </body>
 </html>`;
     }
