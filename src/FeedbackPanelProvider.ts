@@ -2064,10 +2064,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 const icon = file.isFolder ? '📁' : '📄';
                 const hasChildren = file.isFolder && folderHasChildren(file.relativePath);
                 const expandBtn = hasChildren ? \`<button class="expand-btn" data-folder="\${file.relativePath}" title="展开文件夹">▶</button>\` : '';
-                return \`<div class="mention-menu-item\${idx === selectedMentionIndex ? ' selected' : ''}" data-path="\${file.fullPath}" data-relative="\${file.relativePath}" data-is-folder="\${file.isFolder}">
+                return \`<div class="mention-menu-item\${idx === selectedMentionIndex ? ' selected' : ''}" data-path="\${file.fullPath}" data-name="\${file.name}" data-is-folder="\${file.isFolder}" data-relative="\${file.relativePath}">
                     <span class="icon">\${icon}</span>
                     <span class="label">\${file.name}</span>
-                    <span class="hint">\${file.relativePath}</span>
+                    <span class="hint">\${file.fullPath}</span>
                     \${expandBtn}
                 </div>\`;
             }).join('');
@@ -2111,17 +2111,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             folderHistory = [];
         }
         
-        // 处理菜单项选择
-        function selectMentionItem(relativePath) {
+        // 处理菜单项选择 - 使用绝对路径
+        function selectMentionItem(fullPath, fileName) {
             // 替换 @ 及之后输入的搜索词为选中的文件路径
+            // 显示格式: @文件名，实际值: 绝对路径
             if (mentionStartPos >= 0) {
                 const text = feedbackInput.value;
                 const cursorPos = feedbackInput.selectionStart;
                 const beforeAt = text.substring(0, mentionStartPos);
                 const afterSearch = text.substring(cursorPos);
-                const newText = beforeAt + '\`' + relativePath + '\`' + afterSearch;
+                // 使用绝对路径作为实际值
+                const newText = beforeAt + '\`' + fullPath + '\`' + afterSearch;
                 feedbackInput.value = newText;
-                const newCursorPos = mentionStartPos + relativePath.length + 2;
+                const newCursorPos = mentionStartPos + fullPath.length + 2;
                 feedbackInput.selectionStart = feedbackInput.selectionEnd = newCursorPos;
             }
             hideMentionMenu();
@@ -2173,8 +2175,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             } else if (e.key === 'Enter' && !e.ctrlKey) {
                 e.preventDefault();
                 const selectedItem = items[selectedMentionIndex];
-                if (selectedItem && selectedItem.dataset.relative) {
-                    selectMentionItem(selectedItem.dataset.relative);
+                if (selectedItem && selectedItem.dataset.path) {
+                    selectMentionItem(selectedItem.dataset.path, selectedItem.dataset.name);
                 }
             } else if (e.key === 'Escape') {
                 e.preventDefault();
@@ -2182,8 +2184,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             } else if (e.key === 'Tab') {
                 e.preventDefault();
                 const selectedItem = items[selectedMentionIndex];
-                if (selectedItem && selectedItem.dataset.relative) {
-                    selectMentionItem(selectedItem.dataset.relative);
+                if (selectedItem && selectedItem.dataset.path) {
+                    selectMentionItem(selectedItem.dataset.path, selectedItem.dataset.name);
                 }
             }
         });
@@ -2206,10 +2208,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 return;
             }
             
-            // 点击菜单项本身 -> 选择路径
+            // 点击菜单项本身 -> 选择路径（使用绝对路径）
             const item = e.target.closest('.mention-menu-item');
-            if (item && item.dataset.relative) {
-                selectMentionItem(item.dataset.relative);
+            if (item && item.dataset.path) {
+                selectMentionItem(item.dataset.path, item.dataset.name);
             }
         });
         

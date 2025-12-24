@@ -1,6 +1,6 @@
 # Panel Feedback 💬
 
-一个 VS Code / Windsurf 扩展，为 AI 助手（如 Cascade、Claude）提供嵌入式侧边栏交互面板，支持 MCP（Model Context Protocol）协议。
+一个 VS Code / Windsurf 扩展，为 AI 助手提供嵌入式侧边栏交互面板，支持 MCP（Model Context Protocol）协议。
 
 ## ✨ 功能特性
 
