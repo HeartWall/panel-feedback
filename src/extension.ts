@@ -169,6 +169,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 创建侧边栏 Provider
     const provider = new FeedbackPanelProvider(context.extensionUri);
+    provider.setExtensionContext(context);  // 设置上下文用于自动打开 tab 页
     
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
@@ -186,6 +187,11 @@ export function activate(context: vscode.ExtensionContext) {
     mcpServer = new MCPServer(provider);
     mcpServer.setContext(context);  // 传递 context 用于持久化
     mcpServer.start();
+
+    // 设置结束对话回调，清理 MCP 状态
+    provider.setOnEndConversation(() => {
+        mcpServer?.clearPendingRequests();
+    });
 
     // 注册命令
     context.subscriptions.push(
@@ -248,6 +254,8 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('feedbackPanel.clearHistory', () => {
             provider.clearHistory();
+            // 同时清理 MCP 待处理请求
+            mcpServer?.clearPendingRequests();
         })
     );
 
@@ -257,6 +265,7 @@ export function activate(context: vscode.ExtensionContext) {
             provider.openInEditor(context);
         })
     );
+
 }
 
 export function deactivate() {

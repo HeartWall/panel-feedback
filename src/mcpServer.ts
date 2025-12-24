@@ -128,11 +128,16 @@ export class MCPServer {
         this.restorePendingRequests();
     }
 
+    // 获取带工作区隔离的存储 key
+    private getPendingRequestsKey(): string {
+        return `pendingRequests_${this.workspaceHash || 'default'}`;
+    }
+
     // 从持久化存储恢复未完成请求
     private restorePendingRequests() {
         if (!this.context) return;
         
-        const stored = this.context.globalState.get<PendingRequest[]>('pendingRequests', []);
+        const stored = this.context.globalState.get<PendingRequest[]>(this.getPendingRequestsKey(), []);
         const now = Date.now();
         const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
         
@@ -148,12 +153,19 @@ export class MCPServer {
         console.log(`Restored ${this.pendingRequests.size} pending requests`);
     }
 
+    // 清除所有待处理请求（结束对话时调用）
+    public clearPendingRequests(): void {
+        this.pendingRequests.clear();
+        this.persistRequests();
+        console.log('All pending requests cleared');
+    }
+
     // 持久化请求状态
     private persistRequests() {
         if (!this.context) return;
         
         const requests = Array.from(this.pendingRequests.values());
-        this.context.globalState.update('pendingRequests', requests);
+        this.context.globalState.update(this.getPendingRequestsKey(), requests);
     }
 
     // 处理请求（显示到面板）

@@ -21,6 +21,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _rules: string = '';
     private _workspaceHash: string = '';  // 工作空间哈希值
     private _workspaceName: string = '';  // 工作空间名称
+    private _onEndConversation?: () => void;  // 结束对话回调
 
     constructor(private readonly _extensionUri: vscode.Uri) {
         // 生成工作空间哈希值
@@ -32,6 +33,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             this._workspaceHash = hash.substring(0, 8);
         }
     }
+
+    private _extensionContext?: vscode.ExtensionContext;
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -46,6 +49,13 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        // 侧边栏视图变为可见时，自动打开 tab 页
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible && this._extensionContext) {
+                this.openInEditor(this._extensionContext);
+            }
+        });
 
         // 监听来自 webview 的消息
         webviewView.webview.onDidReceiveMessage(data => {
@@ -83,6 +93,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'copyToClipboard':
                     vscode.env.clipboard.writeText(data.text);
                     break;
+                case 'openLogFolder':
+                    this._openLogFolder();
+                    break;
+                case 'selectFile':
+                    this._handleSelectFile(data.selectType);
+                    break;
+                case 'getWorkspaceFiles':
+                    this._handleGetWorkspaceFiles(data.query || '');
+                    break;
             }
         });
     }
@@ -91,6 +110,121 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const ext = vscode.extensions.getExtension('fhyfhy17.windsurf-feedback-panel');
         const version = ext?.packageJSON.version || 'unknown';
         this._view?.webview.postMessage({ type: 'versionInfo', version });
+    }
+
+    private _openLogFolder() {
+        const os = require('os');
+        const path = require('path');
+        const logDir = path.join(os.homedir(), '.panel-feedback');
+        vscode.env.openExternal(vscode.Uri.file(logDir));
+    }
+
+    private async _handleSelectFile(selectType: 'file' | 'folder') {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+        
+        const options: vscode.OpenDialogOptions = {
+            canSelectMany: true,
+            canSelectFolders: selectType === 'folder',
+            canSelectFiles: selectType === 'file',
+            defaultUri: workspaceFolder,
+            title: selectType === 'file' ? '选择文件' : '选择文件夹'
+        };
+        
+        const uris = await vscode.window.showOpenDialog(options);
+        
+        if (uris && uris.length > 0) {
+            const paths = uris.map(uri => uri.fsPath);
+            const msgData = { type: 'fileSelected', paths };
+            this._view?.webview.postMessage(msgData);
+            this._editorPanel?.webview.postMessage(msgData);
+        }
+    }
+
+    private async _getWorkspaceFiles(query: string) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            return [];
+        }
+
+        const excludePatterns = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/out/**', '**/.vscode/**', '**/build/**', '**/*.vsix', '**/screenshots/**'];
+        
+        try {
+            // 增加文件数量限制以支持更多递归文件
+            const files = await vscode.workspace.findFiles(
+                '**/*',
+                `{${excludePatterns.join(',')}}`,
+                500
+            );
+
+            const workspacePath = workspaceFolder.uri.fsPath;
+            const results: { name: string; relativePath: string; fullPath: string; isFolder: boolean; depth: number }[] = [];
+            const folderSet = new Set<string>();
+
+            for (const file of files) {
+                const relativePath = path.relative(workspacePath, file.fsPath);
+                const fileName = path.basename(file.fsPath);
+                const depth = relativePath.split(path.sep).length;
+                
+                // 添加文件
+                if (!query || fileName.toLowerCase().includes(query.toLowerCase()) || relativePath.toLowerCase().includes(query.toLowerCase())) {
+                    results.push({
+                        name: fileName,
+                        relativePath: relativePath,
+                        fullPath: file.fsPath,
+                        isFolder: false,
+                        depth: depth
+                    });
+                }
+
+                // 收集所有层级的文件夹
+                const dirPath = path.dirname(relativePath);
+                if (dirPath && dirPath !== '.') {
+                    const parts = dirPath.split(path.sep);
+                    let currentPath = '';
+                    for (let i = 0; i < parts.length; i++) {
+                        const part = parts[i];
+                        currentPath = currentPath ? path.join(currentPath, part) : part;
+                        if (!folderSet.has(currentPath)) {
+                            folderSet.add(currentPath);
+                            const folderName = path.basename(currentPath);
+                            const folderDepth = i + 1;
+                            if (!query || folderName.toLowerCase().includes(query.toLowerCase()) || currentPath.toLowerCase().includes(query.toLowerCase())) {
+                                results.push({
+                                    name: folderName,
+                                    relativePath: currentPath,
+                                    fullPath: path.join(workspacePath, currentPath),
+                                    isFolder: true,
+                                    depth: folderDepth
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 去重并排序：先按深度，再按类型（文件夹优先），最后按路径
+            const uniqueResults = Array.from(new Map(results.map(r => [r.fullPath, r])).values());
+            uniqueResults.sort((a, b) => {
+                // 先按深度排序（浅层优先）
+                if (a.depth !== b.depth) return a.depth - b.depth;
+                // 同深度下文件夹优先
+                if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
+                // 最后按路径字母顺序
+                return a.relativePath.localeCompare(b.relativePath);
+            });
+
+            return uniqueResults.slice(0, 100);
+        } catch (error) {
+            console.error('Error getting workspace files:', error);
+            return [];
+        }
+    }
+
+    private async _handleGetWorkspaceFiles(query: string) {
+        const files = await this._getWorkspaceFiles(query);
+        const msgData = { type: 'workspaceFiles', files };
+        this._view?.webview.postMessage(msgData);
+        this._editorPanel?.webview.postMessage(msgData);
     }
 
     private _sendWorkspaceInfo() {
@@ -344,22 +478,61 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
     }
     
+    // 设置结束对话回调
+    public setOnEndConversation(callback: () => void) {
+        this._onEndConversation = callback;
+    }
+
+    // 设置扩展上下文（用于自动打开 tab 页）
+    public setExtensionContext(context: vscode.ExtensionContext) {
+        this._extensionContext = context;
+    }
+    
     private _handleEndConversation() {
+        console.log('End conversation triggered, pendingResolve:', !!this._pendingResolve);
         // 结束对话：向 AI 发送结束信号
         if (this._pendingResolve) {
+            console.log('Resolving pending request with end signal');
             this._pendingResolve('[用户主动结束了对话]');
             this._pendingResolve = undefined;
         }
+        // 调用结束对话回调（清理 MCP 状态）
+        this._onEndConversation?.();
+        // 清除历史并重置 UI
         this.clearHistory();
-        // 重置 UI 到空状态
-        const msgData = { type: 'resetToEmpty' };
-        this._view?.webview.postMessage(msgData);
-        this._editorPanel?.webview.postMessage(msgData);
     }
     
     public clearHistory() {
+        console.log('clearHistory called');
         this._chatHistory = [];
-        this._updateHistoryInView();
+        this._currentMessage = '';
+        this._currentOptions = [];
+        // 发送重置消息到两个 webview
+        const msgData = { type: 'resetToEmpty' };
+        if (this._view) {
+            console.log('Sending resetToEmpty to sidebar');
+            this._view.webview.postMessage(msgData);
+        }
+        if (this._editorPanel) {
+            console.log('Sending resetToEmpty to editor panel');
+            this._editorPanel.webview.postMessage(msgData);
+        }
+    }
+
+    // 同步状态到所有 webview
+    private _syncStateToAllWebviews() {
+        const msgData = {
+            type: 'showMessage',
+            message: this._currentMessage,
+            options: this._currentOptions,
+            history: this._chatHistory
+        };
+        if (this._view) {
+            this._view.webview.postMessage(msgData);
+        }
+        if (this._editorPanel) {
+            this._editorPanel.webview.postMessage(msgData);
+        }
     }
 
     public openSettings() {
@@ -390,23 +563,23 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             history: this._chatHistory
         };
 
-        // 优先使用编辑器面板
+        // 同步发送到两个 webview
         if (this._editorPanel) {
             this._editorPanel.reveal();
             this._editorPanel.webview.postMessage(msgData);
-        } else {
-            // 如果 webview 未初始化，先打开面板
-            if (!this._view) {
-                await vscode.commands.executeCommand('feedbackPanel.view.focus');
-                // 等待 webview 初始化
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-
-            if (this._view) {
-                // false = 不保留焦点，让面板获得焦点
-                this._view.show?.(false);
-                this._view.webview.postMessage(msgData);
-            }
+        }
+        if (this._view) {
+            this._view.webview.postMessage(msgData);
+        }
+        
+        // 如果两个都没有，尝试打开
+        if (!this._editorPanel && !this._view) {
+            await vscode.commands.executeCommand('feedbackPanel.view.focus');
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        // 再次检查并发送
+        if (this._view && !this._editorPanel) {
+            this._view.webview.postMessage(msgData);
         }
 
         return new Promise((resolve) => {
@@ -465,6 +638,24 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'saveRules':
                     this._saveRules(data.rules);
                     break;
+                case 'getWorkspaceInfo':
+                    this._sendWorkspaceInfo();
+                    break;
+                case 'endConversation':
+                    this._handleEndConversation();
+                    break;
+                case 'copyToClipboard':
+                    vscode.env.clipboard.writeText(data.text);
+                    break;
+                case 'openLogFolder':
+                    this._openLogFolder();
+                    break;
+                case 'selectFile':
+                    this._handleSelectFile(data.selectType);
+                    break;
+                case 'getWorkspaceFiles':
+                    this._handleGetWorkspaceFiles(data.query || '');
+                    break;
             }
         }, undefined, context.subscriptions);
 
@@ -493,6 +684,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     private _getHtmlForWebview(webview: vscode.Webview): string {
+        // 获取配置的最小宽度
+        const config = vscode.workspace.getConfiguration('feedbackPanel');
+        const minWidth = config.get<number>('minWidth', 280);
+        
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -514,6 +709,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             height: 100vh;
             display: flex;
             flex-direction: column;
+            min-width: ${minWidth}px;
+        }
+        html {
+            min-width: ${minWidth}px;
         }
         .chat-container {
             margin-bottom: 12px;
@@ -560,6 +759,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .message {
             line-height: 1.6;
             white-space: pre-wrap;
+            text-align: left;
         }
         .message h1, .message h2, .message h3 {
             margin: 8px 0;
@@ -971,6 +1171,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
             opacity: 0.7;
+            margin-right: 16px;
         }
         .input-actions {
             display: flex;
@@ -1011,6 +1212,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             border: 1px solid var(--vscode-widget-border);
         }
         .end-btn:hover {
+            background: var(--vscode-errorForeground);
+            color: white;
+            border-color: var(--vscode-errorForeground);
+        }
+        .input-area.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        .input-area.disabled .end-btn {
+            pointer-events: auto;
+            opacity: 1;
+        }
+        .input-area.disabled .end-btn:hover {
             background: var(--vscode-errorForeground);
             color: white;
             border-color: var(--vscode-errorForeground);
@@ -1107,24 +1321,39 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-descriptionForeground);
             flex-shrink: 0;
         }
-        .input-history-item .delete-btn {
+        .input-history-item .delete-btn,
+        .input-history-item .pin-btn {
             background: none;
             border: none;
             color: var(--vscode-descriptionForeground);
             cursor: pointer;
+            padding: 2px 6px;
             font-size: 14px;
-            padding: 2px 4px;
             opacity: 0;
             transition: opacity 0.15s;
         }
-        .input-history-item:hover .delete-btn {
+        .input-history-item:hover .delete-btn,
+        .input-history-item:hover .pin-btn {
             opacity: 1;
         }
         .input-history-item .delete-btn:hover {
             color: var(--vscode-errorForeground);
         }
+        .input-history-item .pin-btn:hover {
+            color: var(--vscode-textLink-foreground);
+        }
+        .input-history-item .pin-btn.pinned {
+            opacity: 1;
+            color: var(--vscode-textLink-foreground);
+        }
+        .input-history-item.pinned {
+            background: rgba(33, 150, 243, 0.05);
+        }
+        .input-history-item.pinned .check-icon {
+            color: var(--vscode-textLink-foreground);
+        }
         .input-history-empty {
-            padding: 20px;
+            padding: 12px;
             text-align: center;
             color: var(--vscode-descriptionForeground);
             font-size: 12px;
@@ -1224,6 +1453,25 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .copy-hash-btn:hover {
             opacity: 1;
         }
+        .start-dialog-btn {
+            margin-top: 16px;
+            padding: 8px 20px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background 0.2s, transform 0.1s;
+        }
+        .start-dialog-btn:hover {
+            background: var(--vscode-button-hoverBackground);
+            transform: translateY(-1px);
+        }
+        .start-dialog-btn:active {
+            transform: translateY(0);
+        }
         #dropZone {
             border: 2px dashed var(--vscode-widget-border);
             border-radius: 4px;
@@ -1238,6 +1486,133 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             background: var(--vscode-editor-selectionBackground);
         }
         .hidden { display: none !important; }
+        
+        /* @ 提及菜单样式 */
+        .mention-menu {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 4px);
+            left: 14px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 150;
+            min-width: 280px;
+            max-width: 400px;
+            overflow: hidden;
+        }
+        .mention-menu.show {
+            display: block;
+        }
+        .mention-menu-header {
+            padding: 8px 12px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            border-bottom: 1px solid var(--vscode-widget-border);
+            background: rgba(128, 128, 128, 0.05);
+        }
+        .mention-menu-list {
+            max-height: 320px;
+            overflow-y: auto;
+        }
+        .mention-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+            font-size: 13px;
+            color: var(--vscode-foreground);
+        }
+        .mention-menu-item:hover,
+        .mention-menu-item.selected {
+            background: var(--vscode-list-hoverBackground);
+        }
+        .mention-menu-item .icon {
+            font-size: 14px;
+            width: 18px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .mention-menu-item .label {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .mention-menu-item .hint {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 150px;
+        }
+        .mention-menu-empty {
+            padding: 12px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
+        }
+        .mention-menu-loading {
+            padding: 12px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
+        }
+        .mention-menu-item .expand-btn {
+            width: 36px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            background: transparent;
+            margin: -4px -8px -4px 0;
+            cursor: pointer;
+            color: var(--vscode-foreground);
+            opacity: 0.6;
+            border-radius: 3px;
+            flex-shrink: 0;
+            font-size: 10px;
+            transition: opacity 0.15s, background 0.15s;
+        }
+        .mention-menu-item .expand-btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        .mention-menu-breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 12px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            border-bottom: 1px solid var(--vscode-widget-border);
+            background: rgba(128, 128, 128, 0.03);
+        }
+        .mention-menu-breadcrumb .back-btn {
+            padding: 6px 12px;
+            border: none;
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            min-height: 28px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .mention-menu-breadcrumb .back-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        .mention-menu-breadcrumb .back-btn:active {
+            transform: scale(0.98);
+        }
         
         /* 新消息高亮样式 - 1.5秒蓝色闪烁效果 */
         .current-question.new-message {
@@ -1297,14 +1672,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             <code id="workspaceHashDisplay" class="workspace-hash"></code>
             <button id="copyHashBtn" class="copy-hash-btn" title="复制哈希值">📋</button>
         </div>
-        <button class="start-chat-btn" id="startChatBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 5v14M5 12h14"/>
-            </svg>
-            开始对话
-        </button>
-        <div class="start-hint">点击复制提示词，粘贴到 AI 对话框中</div>
-        <div class="copy-success" id="copySuccess">✓ 已复制到剪贴板</div>
+        <button id="startDialogBtn" class="start-dialog-btn" style="display: none;">开启对话</button>
     </div>
 
     <div id="feedbackArea" class="hidden" style="position: relative; flex-direction: column; height: 100%; overflow-y: auto;">
@@ -1341,9 +1709,16 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     </div>
                     <div id="inputHistoryList" class="input-history-list"></div>
                 </div>
+                <div id="mentionMenu" class="mention-menu">
+                    <div class="mention-menu-header">选择文件或文件夹</div>
+                    <div id="mentionBreadcrumb" class="mention-menu-breadcrumb" style="display: none;"></div>
+                    <div id="mentionMenuList" class="mention-menu-list">
+                        <div class="mention-menu-loading">加载中...</div>
+                    </div>
+                </div>
                 <textarea 
                     id="feedbackInput" 
-                    placeholder="输入反馈内容，支持粘贴图片 (Ctrl+V)..."
+                    placeholder="输入反馈内容，@ 引用文件，支持粘贴图片 (Ctrl+V)..."
                     rows="2"
                 ></textarea>
                 <div class="input-toolbar">
@@ -1430,21 +1805,55 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         function addToInputHistory(text) {
             if (!text || !text.trim()) return;
             
-            // 移除重复项
-            inputHistory = inputHistory.filter(item => item.text !== text);
+            // 检查是否已存在（保留置顶状态）
+            const existingIndex = inputHistory.findIndex(item => item.text === text);
+            if (existingIndex !== -1) {
+                const existing = inputHistory[existingIndex];
+                inputHistory.splice(existingIndex, 1);
+                existing.timestamp = Date.now();
+                // 置顶项保持在最前面，非置顶项插入到置顶项之后
+                if (existing.pinned) {
+                    inputHistory.unshift(existing);
+                } else {
+                    const firstNonPinnedIndex = inputHistory.findIndex(item => !item.pinned);
+                    if (firstNonPinnedIndex === -1) {
+                        inputHistory.push(existing);
+                    } else {
+                        inputHistory.splice(firstNonPinnedIndex, 0, existing);
+                    }
+                }
+            } else {
+                // 新项插入到置顶项之后
+                const newItem = { text: text, timestamp: Date.now(), pinned: false };
+                const firstNonPinnedIndex = inputHistory.findIndex(item => !item.pinned);
+                if (firstNonPinnedIndex === -1) {
+                    inputHistory.push(newItem);
+                } else {
+                    inputHistory.splice(firstNonPinnedIndex, 0, newItem);
+                }
+            }
             
-            // 添加到开头
-            inputHistory.unshift({
-                text: text,
-                timestamp: Date.now()
-            });
-            
-            // 限制数量
-            if (inputHistory.length > MAX_INPUT_HISTORY) {
-                inputHistory = inputHistory.slice(0, MAX_INPUT_HISTORY);
+            // 限制数量：置顶项不计入限制
+            const pinnedItems = inputHistory.filter(item => item.pinned);
+            const nonPinnedItems = inputHistory.filter(item => !item.pinned);
+            if (nonPinnedItems.length > MAX_INPUT_HISTORY) {
+                inputHistory = [...pinnedItems, ...nonPinnedItems.slice(0, MAX_INPUT_HISTORY)];
             }
             
             saveInputHistory();
+        }
+        
+        // 切换置顶状态
+        function togglePinItem(index) {
+            if (inputHistory[index]) {
+                inputHistory[index].pinned = !inputHistory[index].pinned;
+                // 重新排序：置顶项在前
+                const pinnedItems = inputHistory.filter(item => item.pinned);
+                const nonPinnedItems = inputHistory.filter(item => !item.pinned);
+                inputHistory = [...pinnedItems, ...nonPinnedItems];
+                saveInputHistory();
+                renderInputHistory();
+            }
         }
         
         // 删除历史项
@@ -1480,10 +1889,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
             
             list.innerHTML = inputHistory.map((item, index) => \`
-                <div class="input-history-item" data-index="\${index}">
-                    <span class="check-icon">✓</span>
+                <div class="input-history-item\${item.pinned ? ' pinned' : ''}" data-index="\${index}">
+                    <span class="check-icon">\${item.pinned ? '📌' : '✓'}</span>
                     <span class="content" title="\${item.text.replace(/"/g, '&quot;')}">\${item.text}</span>
                     <span class="time">\${formatRelativeTime(item.timestamp)}</span>
+                    <button class="pin-btn\${item.pinned ? ' pinned' : ''}" data-index="\${index}" title="\${item.pinned ? '取消置顶' : '置顶'}">📌</button>
                     <button class="delete-btn" data-index="\${index}" title="删除">×</button>
                 </div>
             \`).join('');
@@ -1520,6 +1930,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 return;
             }
             
+            const pinBtn = e.target.closest('.pin-btn');
+            if (pinBtn) {
+                e.stopPropagation();
+                const index = parseInt(pinBtn.dataset.index);
+                togglePinItem(index);
+                return;
+            }
+            
             const item = e.target.closest('.input-history-item');
             if (item) {
                 const index = parseInt(item.dataset.index);
@@ -1541,11 +1959,263 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 inputHistoryPanel.classList.remove('show');
                 historyBtn.classList.remove('active');
             }
+            // 点击外部关闭 @ 提及菜单
+            const mentionMenu = document.getElementById('mentionMenu');
+            if (mentionMenu && !mentionMenu.contains(e.target) && 
+                e.target !== feedbackInput && 
+                mentionMenu.classList.contains('show')) {
+                mentionMenu.classList.remove('show');
+            }
+        });
+        
+        // @ 提及功能
+        const mentionMenu = document.getElementById('mentionMenu');
+        const mentionMenuList = document.getElementById('mentionMenuList');
+        let mentionStartPos = -1;  // @ 符号的位置
+        let selectedMentionIndex = 0;  // 当前选中的菜单项索引
+        let workspaceFiles = [];  // 工作区文件列表缓存
+        let filteredFiles = [];  // 过滤后的文件列表
+        let currentFolderPath = '';  // 当前浏览的文件夹路径
+        let folderHistory = [];  // 文件夹浏览历史，用于返回
+        
+        // 更新菜单项选中状态
+        function updateMentionSelection() {
+            const items = mentionMenu.querySelectorAll('.mention-menu-item');
+            items.forEach((item, idx) => {
+                item.classList.toggle('selected', idx === selectedMentionIndex);
+            });
+            // 滚动到选中项
+            const selectedItem = items[selectedMentionIndex];
+            if (selectedItem) {
+                selectedItem.scrollIntoView({ block: 'nearest' });
+            }
+        }
+        
+        // 检查文件夹是否有子级
+        function folderHasChildren(folderPath) {
+            return workspaceFiles.some(f => {
+                const parentPath = f.relativePath.substring(0, f.relativePath.lastIndexOf('/') !== -1 ? f.relativePath.lastIndexOf('/') : f.relativePath.lastIndexOf('\\\\'));
+                return parentPath === folderPath || f.relativePath.startsWith(folderPath + '/') || f.relativePath.startsWith(folderPath + '\\\\');
+            });
+        }
+        
+        // 获取当前文件夹下的直接子级
+        function getChildrenOfFolder(folderPath) {
+            if (!folderPath) {
+                // 根目录：返回 depth=1 的文件和文件夹
+                return workspaceFiles.filter(f => f.depth === 1);
+            }
+            const normalizedPath = folderPath.replace(/\\\\/g, '/');
+            return workspaceFiles.filter(f => {
+                const normalizedRelative = f.relativePath.replace(/\\\\/g, '/');
+                if (!normalizedRelative.startsWith(normalizedPath + '/')) return false;
+                const remaining = normalizedRelative.substring(normalizedPath.length + 1);
+                return !remaining.includes('/');
+            });
+        }
+        
+        // 渲染面包屑导航
+        function renderBreadcrumb() {
+            const breadcrumbContainer = document.getElementById('mentionBreadcrumb');
+            if (!breadcrumbContainer) return;
+            
+            if (!currentFolderPath) {
+                breadcrumbContainer.style.display = 'none';
+                return;
+            }
+            
+            breadcrumbContainer.style.display = 'flex';
+            breadcrumbContainer.innerHTML = \`
+                <button class="back-btn" id="mentionBackBtn">← 返回</button>
+                <span>📂 \${currentFolderPath}</span>
+            \`;
+        }
+        
+        // 进入文件夹
+        function enterFolder(folderPath) {
+            folderHistory.push(currentFolderPath);
+            currentFolderPath = folderPath;
+            const children = getChildrenOfFolder(folderPath);
+            renderBreadcrumb();
+            renderFileList(children);
+        }
+        
+        // 返回上一级
+        function goBack() {
+            if (folderHistory.length > 0) {
+                currentFolderPath = folderHistory.pop();
+            } else {
+                currentFolderPath = '';
+            }
+            const children = getChildrenOfFolder(currentFolderPath);
+            renderBreadcrumb();
+            renderFileList(children);
+        }
+        
+        // 渲染文件列表
+        function renderFileList(files) {
+            filteredFiles = files;
+            if (files.length === 0) {
+                mentionMenuList.innerHTML = '<div class="mention-menu-empty">没有找到匹配的文件</div>';
+                return;
+            }
+            
+            const html = files.slice(0, 20).map((file, idx) => {
+                const icon = file.isFolder ? '📁' : '📄';
+                const hasChildren = file.isFolder && folderHasChildren(file.relativePath);
+                const expandBtn = hasChildren ? \`<button class="expand-btn" data-folder="\${file.relativePath}" title="展开文件夹">▶</button>\` : '';
+                return \`<div class="mention-menu-item\${idx === selectedMentionIndex ? ' selected' : ''}" data-path="\${file.fullPath}" data-relative="\${file.relativePath}" data-is-folder="\${file.isFolder}">
+                    <span class="icon">\${icon}</span>
+                    <span class="label">\${file.name}</span>
+                    <span class="hint">\${file.relativePath}</span>
+                    \${expandBtn}
+                </div>\`;
+            }).join('');
+            
+            mentionMenuList.innerHTML = html;
+        }
+        
+        // 过滤文件列表
+        function filterFiles(query) {
+            if (!query) {
+                renderFileList(workspaceFiles.slice(0, 20));
+                return;
+            }
+            const lowerQuery = query.toLowerCase();
+            const filtered = workspaceFiles.filter(f => 
+                f.name.toLowerCase().includes(lowerQuery) || 
+                f.relativePath.toLowerCase().includes(lowerQuery)
+            );
+            renderFileList(filtered);
+        }
+        
+        // 显示提及菜单
+        function showMentionMenu() {
+            mentionMenu.classList.add('show');
+            selectedMentionIndex = 0;
+            // 重置文件夹浏览状态
+            currentFolderPath = '';
+            folderHistory = [];
+            renderBreadcrumb();
+            mentionMenuList.innerHTML = '<div class="mention-menu-loading">加载中...</div>';
+            // 请求工作区文件
+            vscode.postMessage({ type: 'getWorkspaceFiles', query: '' });
+        }
+        
+        // 隐藏提及菜单
+        function hideMentionMenu() {
+            mentionMenu.classList.remove('show');
+            mentionStartPos = -1;
+            // 重置文件夹浏览状态
+            currentFolderPath = '';
+            folderHistory = [];
+        }
+        
+        // 处理菜单项选择
+        function selectMentionItem(relativePath) {
+            // 替换 @ 及之后输入的搜索词为选中的文件路径
+            if (mentionStartPos >= 0) {
+                const text = feedbackInput.value;
+                const cursorPos = feedbackInput.selectionStart;
+                const beforeAt = text.substring(0, mentionStartPos);
+                const afterSearch = text.substring(cursorPos);
+                const newText = beforeAt + '\`' + relativePath + '\`' + afterSearch;
+                feedbackInput.value = newText;
+                const newCursorPos = mentionStartPos + relativePath.length + 2;
+                feedbackInput.selectionStart = feedbackInput.selectionEnd = newCursorPos;
+            }
+            hideMentionMenu();
+        }
+        
+        // 监听输入框输入
+        feedbackInput.addEventListener('input', (e) => {
+            const cursorPos = feedbackInput.selectionStart;
+            const text = feedbackInput.value;
+            const lastChar = text.charAt(cursorPos - 1);
+            
+            // 检测 @ 符号
+            if (lastChar === '@') {
+                // 检查前一个字符是否为空格或行首
+                const prevChar = cursorPos > 1 ? text.charAt(cursorPos - 2) : '';
+                if (prevChar === '' || prevChar === ' ' || prevChar === '\\n') {
+                    mentionStartPos = cursorPos - 1;
+                    showMentionMenu();
+                }
+            } else if (mentionMenu.classList.contains('show')) {
+                // 如果菜单显示中，根据输入过滤文件列表
+                const textAfterAt = text.substring(mentionStartPos + 1, cursorPos);
+                if (textAfterAt.includes(' ') || textAfterAt.length > 30) {
+                    hideMentionMenu();
+                } else {
+                    // 过滤文件列表
+                    filterFiles(textAfterAt);
+                    selectedMentionIndex = 0;
+                    updateMentionSelection();
+                }
+            }
+        });
+        
+        // 监听键盘事件处理菜单导航
+        feedbackInput.addEventListener('keydown', (e) => {
+            if (!mentionMenu.classList.contains('show')) return;
+            
+            const items = mentionMenu.querySelectorAll('.mention-menu-item');
+            if (items.length === 0) return;
+            
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                selectedMentionIndex = (selectedMentionIndex + 1) % items.length;
+                updateMentionSelection();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                selectedMentionIndex = (selectedMentionIndex - 1 + items.length) % items.length;
+                updateMentionSelection();
+            } else if (e.key === 'Enter' && !e.ctrlKey) {
+                e.preventDefault();
+                const selectedItem = items[selectedMentionIndex];
+                if (selectedItem && selectedItem.dataset.relative) {
+                    selectMentionItem(selectedItem.dataset.relative);
+                }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                hideMentionMenu();
+            } else if (e.key === 'Tab') {
+                e.preventDefault();
+                const selectedItem = items[selectedMentionIndex];
+                if (selectedItem && selectedItem.dataset.relative) {
+                    selectMentionItem(selectedItem.dataset.relative);
+                }
+            }
+        });
+        
+        // 点击菜单项
+        mentionMenu.addEventListener('click', (e) => {
+            // 点击返回按钮
+            const backBtn = e.target.closest('#mentionBackBtn');
+            if (backBtn) {
+                e.stopPropagation();
+                goBack();
+                return;
+            }
+            
+            // 点击展开箭头按钮
+            const expandBtn = e.target.closest('.expand-btn');
+            if (expandBtn && expandBtn.dataset.folder) {
+                e.stopPropagation();
+                enterFolder(expandBtn.dataset.folder);
+                return;
+            }
+            
+            // 点击菜单项本身 -> 选择路径
+            const item = e.target.closest('.mention-menu-item');
+            if (item && item.dataset.relative) {
+                selectMentionItem(item.dataset.relative);
+            }
         });
         
         // 固定操作映射
         const fixedActionTexts = {
-            'commitAndPush': '提交挂起的更改并推送到远程分支',
+            'commitAndPush': '执行 git commit 和 push：1. 先运行 git diff --cached 或 git status 获取暂存的更改内容 2. 根据更改内容自动生成简洁专业的提交信息（格式：类型: 简短描述） 3. 直接执行 git commit -m "生成的信息" 和 git push，不需要询问我确认',
             'codeReview': '审查当前更改的代码，检查潜在问题和改进建议',
             'formatCode': '整理当前文件的代码格式：1. 按执行顺序排列代码 2. 相同类型的代码归类在一起（如常量、变量、函数、类等）3. 清除没有引用的代码 4. 所有对象引用都使用 using 语句 5. 保持逻辑清晰的代码结构'
         };
@@ -1572,35 +2242,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
         };
         
-        // 开始对话按钮
-        const startChatBtn = document.getElementById('startChatBtn');
-        const copySuccess = document.getElementById('copySuccess');
-        
-        startChatBtn.onclick = () => {
-            // 根据是否有哈希值生成不同的提示词
-            const startPrompt = workspaceHash 
-                ? \`使用 panel_feedback MCP 工具与我进行交互对话，workspace_hash 参数填写 "\${workspaceHash}"\`
-                : '使用 panel_feedback MCP 工具与我进行交互对话';
-            
-            // 通过 vscode API 复制到剪贴板
-            vscode.postMessage({ type: 'copyToClipboard', text: startPrompt });
-            
-            copySuccess.classList.add('show');
-            startChatBtn.innerHTML = \`
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M20 6L9 17l-5-5"/>
-                </svg>
-                已复制
-            \`;
-            setTimeout(() => {
-                copySuccess.classList.remove('show');
-                startChatBtn.innerHTML = \`
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                    开始对话
-                \`;
-            }, 2000);
+        // 开启对话按钮
+        const startDialogBtn = document.getElementById('startDialogBtn');
+        startDialogBtn.onclick = () => {
+            if (workspaceHash) {
+                const command = '使用 panel_feedback MCP 工具与我进行交互对话，workspace_hash 参数填写 "' + workspaceHash + '"';
+                vscode.postMessage({ type: 'copyToClipboard', text: command });
+                startDialogBtn.textContent = '已复制指令 ✓';
+                setTimeout(() => {
+                    startDialogBtn.textContent = '开启对话';
+                }, 2000);
+            }
         };
         
         // 固定操作按钮事件（使用事件委托）
@@ -1745,6 +2397,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             // 显示当前问题和输入区
             currentQuestion.style.display = 'block';
             document.querySelector('.input-area').style.display = 'flex';
+            enableInputArea();  // 启用输入区
             fixedActions.style.display = 'flex';  // 显示固定操作
             
             // 渲染历史
@@ -1828,18 +2481,23 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             renderHistory(historyData, true);
         }
 
-        // 显示等待状态（保留历史，隐藏当前问题）
+        // 显示等待状态（保留历史，输入区禁用但可见，结束按钮可用）
         function showWaitingState() {
             feedbackInput.value = '';
             images = [];
             updateImagePreview();
             
-            // 隐藏当前问题和输入区，但保留历史
+            // 隐藏当前问题和选项
             currentQuestion.style.display = 'none';
             optionsContainer.innerHTML = '';
             optionsContainer.style.display = 'none';
-            document.querySelector('.input-area').style.display = 'none';
             fixedActions.style.display = 'none';  // 隐藏固定操作
+            
+            // 输入区保持显示但禁用（结束按钮除外）
+            const inputArea = document.querySelector('.input-area');
+            inputArea.style.display = 'flex';
+            inputArea.classList.add('disabled');
+            feedbackInput.placeholder = '等待 AI 回复...';
             
             // 如果没有历史，则显示空状态
             if (historyData.length <= 1) {
@@ -1850,6 +2508,13 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 const waitingDiv = document.getElementById('waitingHint') || createWaitingHint();
                 waitingDiv.style.display = 'block';
             }
+        }
+        
+        // 启用输入区
+        function enableInputArea() {
+            const inputArea = document.querySelector('.input-area');
+            inputArea.classList.remove('disabled');
+            feedbackInput.placeholder = '输入反馈内容，支持粘贴图片 (Ctrl+V)...';
         }
         
         function createWaitingHint() {
@@ -2024,9 +2689,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         // 结束对话按钮
         const endBtn = document.getElementById('endBtn');
         endBtn.onclick = () => {
-            if (confirm('确定要结束当前对话吗？')) {
-                vscode.postMessage({ type: 'endConversation' });
-            }
+            // webview 中 confirm() 不可用，直接发送结束信号
+            vscode.postMessage({ type: 'endConversation' });
         };
 
         // 快捷键：回车发送，Cmd+回车换行
@@ -2095,9 +2759,28 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     if (workspaceHash) {
                         workspaceHashDisplay.textContent = workspaceHash;
                         workspaceInfo.style.display = 'flex';
+                        startDialogBtn.style.display = 'block';
                     }
                     // 收到工作空间信息后加载历史
                     loadInputHistory();
+                    break;
+                case 'workspaceFiles':
+                    // 接收工作区文件列表
+                    workspaceFiles = data.files || [];
+                    renderFileList(workspaceFiles.slice(0, 20));
+                    break;
+                case 'fileSelected':
+                    // 处理文件选择结果，将路径插入到输入框
+                    if (data.paths && data.paths.length > 0) {
+                        const pathText = data.paths.map(p => '\`' + p + '\`').join(' ');
+                        const currentText = feedbackInput.value;
+                        const cursorPos = feedbackInput.selectionStart;
+                        const before = currentText.substring(0, cursorPos);
+                        const after = currentText.substring(cursorPos);
+                        feedbackInput.value = before + pathText + ' ' + after;
+                        feedbackInput.focus();
+                        feedbackInput.selectionStart = feedbackInput.selectionEnd = cursorPos + pathText.length + 1;
+                    }
                     break;
             }
         });
