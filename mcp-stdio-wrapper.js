@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Stdio wrapper for windsurf-feedback-panel MCP
- * 使用轮询机制等待用户反馈，支持长时间等待（几天）
+ * 使用轮询机制等待用户反馈，支持长时间等待
  */
 
 const http = require('http');
@@ -10,14 +10,13 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
 
-// 端口注册表配置
+// 配置
 const REGISTRY_DIR = path.join(os.homedir(), '.panel-feedback');
-const REGISTRY_FILE = path.join(REGISTRY_DIR, 'ports.json');
 const DEFAULT_PORT = 19876;
 const POLL_INTERVAL = 500;  // 500ms 轮询间隔
 const MAX_POLL_TIME = 86400000 * 7;  // 最长等待 7 天
+const SOFT_TIMEOUT = 120000;  // 2分钟软超时，自动返回让AI继续
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -25,105 +24,21 @@ const rl = readline.createInterface({
     terminal: false
 });
 
-// 读取端口注册表
-function readRegistry() {
+// 获取目标端口（简化版：直接读取端口文件或使用默认端口）
+function getTargetPort() {
     try {
-        if (fs.existsSync(REGISTRY_FILE)) {
-            const content = fs.readFileSync(REGISTRY_FILE, 'utf-8');
-            return JSON.parse(content);
+        const portFile = path.join(REGISTRY_DIR, 'port.json');
+        if (fs.existsSync(portFile)) {
+            const content = fs.readFileSync(portFile, 'utf-8');
+            const data = JSON.parse(content);
+            if (data.port) {
+                return data.port;
+            }
         }
     } catch (e) {
-        process.stderr.write(`Failed to read registry: ${e.message}\n`);
+        // ignore
     }
-    return { windows: [] };
-}
-
-function readPidRegistry(extensionHostPid) {
-    try {
-        if (!extensionHostPid) return null;
-        const f = path.join(REGISTRY_DIR, `port-${extensionHostPid}.json`);
-        if (!fs.existsSync(f)) return null;
-        const content = fs.readFileSync(f, 'utf-8');
-        return JSON.parse(content);
-    } catch (e) {
-        process.stderr.write(`Failed to read pid registry: ${e.message}\n`);
-        return null;
-    }
-}
-
-function getParentPid(pid) {
-    try {
-        const result = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf-8' });
-        const parentPid = result.trim();
-        return parentPid;
-    } catch {
-        return null;
-    }
-}
-
-function findPidRegistryOwnerPid() {
-    let cur = process.ppid;
-    for (let i = 0; i < 8 && cur; i++) {
-        const f = path.join(REGISTRY_DIR, `port-${cur}.json`);
-        if (fs.existsSync(f)) {
-            return String(cur);
-        }
-        const next = getParentPid(cur);
-        if (!next) return null;
-        cur = next;
-    }
-    return null;
-}
-
-// 根据 Extension Host PID、VSCODE_PID、工作区哈希、工作区路径或最近活动时间选择目标端口
-function selectTargetPort(workspace, workspaceHash) {
-    const ownerPid = findPidRegistryOwnerPid();
-    if (ownerPid) {
-        const pidReg = readPidRegistry(ownerPid);
-        if (pidReg && pidReg.port) {
-            process.stderr.write(`Matched by pid registry: ${ownerPid} -> port ${pidReg.port}\n`);
-            return pidReg.port;
-        }
-    }
-
-    const registry = readRegistry();
-    
-    if (registry.windows.length === 0) {
-        return DEFAULT_PORT;  // 回退到默认端口
-    }
-    
-    // 策略 2：使用工作区哈希值匹配（最精确）
-    if (workspaceHash) {
-        const entry = registry.windows.find(e => e.workspaceHash === workspaceHash);
-        if (entry) {
-            process.stderr.write(`Matched by workspaceHash: ${workspaceHash} -> port ${entry.port}\n`);
-            return entry.port;
-        }
-    }
-    
-    // 策略 3：使用 VSCODE_PID 匹配（支持多窗口）
-    const vscodePid = process.env.VSCODE_PID;
-    if (vscodePid) {
-        const entry = registry.windows.find(e => e.vscodePid === vscodePid);
-        if (entry) {
-            process.stderr.write(`Matched by VSCODE_PID: ${vscodePid} -> port ${entry.port}\n`);
-            return entry.port;
-        }
-    }
-    
-    // 策略 4：如果指定了工作区路径，精确匹配
-    if (workspace) {
-        const entry = registry.windows.find(e => e.workspace === workspace);
-        if (entry) {
-            process.stderr.write(`Matched by workspace: ${workspace} -> port ${entry.port}\n`);
-            return entry.port;
-        }
-    }
-    
-    // 策略 5：否则选择最近活动的窗口
-    const sorted = [...registry.windows].sort((a, b) => b.lastActive - a.lastActive);
-    process.stderr.write(`Fallback to most recent: port ${sorted[0].port}\n`);
-    return sorted[0].port;
+    return DEFAULT_PORT;
 }
 
 // 生成唯一请求 ID
@@ -150,7 +65,7 @@ function sendRequest(urlPath, data, targetPort) {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(postData)
             },
-            timeout: 5000  // 短超时，快速失败
+            timeout: 5000
         };
 
         const req = http.request(options, (res) => {
@@ -167,7 +82,6 @@ function sendRequest(urlPath, data, targetPort) {
 
         req.on('error', (e) => {
             if (e.code === 'ECONNREFUSED') {
-                // 服务器未启动，返回特殊标记
                 resolve({ _connectionRefused: true });
             } else {
                 reject(e);
@@ -193,30 +107,40 @@ async function pollForResult(requestId, targetPort) {
         try {
             const result = await sendRequest('/poll', { requestId }, targetPort);
             
-            // 检查连接被拒绝
             if (result._connectionRefused) {
                 connectionRefusedCount++;
-                // 连续多次连接失败才报错
                 if (connectionRefusedCount > 10) {
-                    throw new Error('扩展未启动。请先在 Windsurf 中打开 AI Feedback 面板。');
+                    throw new Error('扩展未启动。请先在 IDE 中打开 Panel Feedback 面板。');
                 }
             } else {
-                connectionRefusedCount = 0;  // 重置计数
+                connectionRefusedCount = 0;
                 
                 if (result.status === 'completed') {
                     return result.data;
                 } else if (result.status === 'error') {
                     throw new Error(result.error || 'Unknown error');
                 }
-                // status === 'pending'，继续轮询
             }
         } catch (err) {
-            // 非连接拒绝的错误，记录但继续轮询
             if (!err.message.includes('扩展未启动')) {
                 process.stderr.write(`Poll error: ${err.message}\n`);
             } else {
-                throw err;  // 连接拒绝太多次，抛出错误
+                throw err;
             }
+        }
+        
+        // 软超时：返回中间状态，解除阻塞让AI可以继续
+        const elapsed = Date.now() - startTime;
+        if (elapsed > SOFT_TIMEOUT) {
+            const waitMinutes = Math.round(elapsed / 60000);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `⏳ 已等待 ${waitMinutes} 分钟，用户尚未响应。\n\n` +
+                          `如需继续等待用户反馈，请再次调用 panel_feedback 工具。\n` +
+                          `或者你可以继续其他对话。`
+                }]
+            };
         }
         
         await sleep(POLL_INTERVAL);
@@ -225,13 +149,12 @@ async function pollForResult(requestId, targetPort) {
     throw new Error('Poll timeout after 7 days');
 }
 
-// 写调试日志到文件
+// 写调试日志
 function writeDebugLog(content) {
     try {
-        const logDir = path.join(os.homedir(), '.panel-feedback');
-        const logFile = path.join(logDir, 'debug.log');
-        if (!fs.existsSync(logDir)) {
-            fs.mkdirSync(logDir, { recursive: true });
+        const logFile = path.join(REGISTRY_DIR, 'debug.log');
+        if (!fs.existsSync(REGISTRY_DIR)) {
+            fs.mkdirSync(REGISTRY_DIR, { recursive: true });
         }
         const timestamp = new Date().toISOString();
         fs.appendFileSync(logFile, `[${timestamp}] ${content}\n`);
@@ -240,40 +163,14 @@ function writeDebugLog(content) {
     }
 }
 
-// 处理 tools/call 请求（使用轮询）
+// 处理 tools/call 请求
 async function handleToolCall(mcpId, params) {
     const requestId = generateRequestId();
+    const targetPort = getTargetPort();
     
-    // 调试日志：写入文件
-    writeDebugLog('=== MCP Call Debug ===');
-    writeDebugLog(`Params: ${JSON.stringify(params, null, 2)}`);
-    writeDebugLog(`PID: ${process.pid}, PPID: ${process.ppid}`);
-    writeDebugLog(`Pid registry owner PID: ${findPidRegistryOwnerPid() || 'unknown'}`);
-    writeDebugLog(`CWD: ${process.cwd()}`);
-    writeDebugLog(`PWD: ${process.env.PWD || 'not set'}`);
-    writeDebugLog(`HOME: ${process.env.HOME || 'not set'}`);
-    // 检查是否有 workspace 相关的环境变量
-    const workspaceEnvs = Object.entries(process.env).filter(([k]) => 
-        k.toLowerCase().includes('workspace') || 
-        k.toLowerCase().includes('folder') ||
-        k.toLowerCase().includes('project') ||
-        k.toLowerCase().includes('vscode') ||
-        k.toLowerCase().includes('windsurf')
-    );
-    writeDebugLog(`Workspace-related envs: ${JSON.stringify(Object.fromEntries(workspaceEnvs), null, 2)}`);
-    writeDebugLog('======================');
+    writeDebugLog(`>>> Tool call: port=${targetPort}, requestId=${requestId}`);
     
-    // 从参数中提取 workspace 和 workspaceHash（如果有）
-    const workspace = params?.arguments?.workspace || '';
-    const workspaceHash = params?.arguments?.workspace_hash || '';
-    const targetPort = selectTargetPort(workspace, workspaceHash);
-    writeDebugLog(`Selected target port: ${targetPort}`);
-    
-    const routeInfo = workspaceHash ? `workspace_hash: ${workspaceHash}` : 
-                      workspace ? `workspace: ${workspace}` : 'most recent';
-    process.stderr.write(`Routing to port ${targetPort} (${routeInfo})\n`);
-    
-    // 1. 提交请求（快速返回）
+    // 1. 提交请求
     const submitResult = await sendRequest('/submit', {
         requestId,
         params
@@ -285,7 +182,7 @@ async function handleToolCall(mcpId, params) {
             id: mcpId,
             error: {
                 code: -32000,
-                message: '扩展未启动。请先在 Windsurf 中打开 AI Feedback 面板。'
+                message: '扩展未启动。请先在 IDE 中打开 Panel Feedback 面板。'
             }
         };
     }
@@ -315,50 +212,32 @@ async function handleToolCall(mcpId, params) {
     }
 }
 
-// 处理其他 MCP 请求（直接转发）
-async function handleOtherRequest(request, workspace, workspaceHash) {
-    const targetPort = selectTargetPort(workspace, workspaceHash);
-    const result = await sendRequest('/', request, targetPort);
-    
-    if (result._connectionRefused) {
-        return {
-            jsonrpc: '2.0',
-            id: request.id,
-            error: {
-                code: -32000,
-                message: '扩展未启动。请先在 Windsurf 中打开 AI Feedback 面板。'
-            }
-        };
-    }
-    
-    return result;
-}
-
 function respond(response) {
-    console.log(JSON.stringify(response));
+    const output = JSON.stringify(response);
+    writeDebugLog(`<<< SENDING: id=${response.id}`);
+    process.stdout.write(output + '\n');
 }
 
 // 处理标准输入
 rl.on('line', async (line) => {
+    writeDebugLog(`>>> RECV: ${line.substring(0, 100)}...`);
     try {
         const request = JSON.parse(line);
         const { id, method, params } = request;
         
         let response;
         
-        // 本地处理 initialize（不依赖扩展）
         if (method === 'initialize') {
             response = {
                 jsonrpc: '2.0',
                 id,
                 result: {
                     protocolVersion: '2024-11-05',
-                    serverInfo: { name: 'panel-feedback', version: '1.1.0' },
+                    serverInfo: { name: 'panel-feedback', version: '2.0.0' },
                     capabilities: { tools: {} }
                 }
             };
         }
-        // 本地处理 tools/list（不依赖扩展）
         else if (method === 'tools/list') {
             response = {
                 jsonrpc: '2.0',
@@ -378,14 +257,6 @@ rl.on('line', async (line) => {
                                     type: 'array',
                                     items: { type: 'string' },
                                     description: '预定义的选项按钮列表'
-                                },
-                                workspace_hash: {
-                                    type: 'string',
-                                    description: '工作区哈希值（8位），用于多项目时精确路由到对应窗口'
-                                },
-                                workspace: {
-                                    type: 'string',
-                                    description: '目标工作区完整路径（可选，用于多窗口时精确路由）'
                                 }
                             },
                             required: ['message']
@@ -394,16 +265,12 @@ rl.on('line', async (line) => {
                 }
             };
         }
-        // 本地处理 notifications/initialized
         else if (method === 'notifications/initialized') {
-            // 通知类请求不需要响应
-            return;
+            return;  // 通知类请求不需要响应
         }
-        // tools/call 请求使用轮询机制（需要扩展）
         else if (method === 'tools/call' && params?.name === 'panel_feedback') {
             response = await handleToolCall(id, params);
         }
-        // 其他请求本地处理
         else {
             response = { jsonrpc: '2.0', id, result: {} };
         }
@@ -419,5 +286,4 @@ rl.on('line', async (line) => {
     }
 });
 
-// 启动时输出就绪信息
-process.stderr.write('windsurf-feedback-panel MCP wrapper started (polling mode)\n');
+process.stderr.write('panel-feedback MCP wrapper started\n');

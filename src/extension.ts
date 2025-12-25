@@ -169,7 +169,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 创建侧边栏 Provider
     const provider = new FeedbackPanelProvider(context.extensionUri);
-    provider.setExtensionContext(context);  // 设置上下文用于自动打开 tab 页
+    provider.setExtensionContext(context);  // 设置上下文
     
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
@@ -259,12 +259,12 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // 在编辑器中打开
-    context.subscriptions.push(
-        vscode.commands.registerCommand('feedbackPanel.openInEditor', () => {
-            provider.openInEditor(context);
-        })
-    );
+    // 在编辑器中打开 - 已移除，只保留边栏
+    // context.subscriptions.push(
+    //     vscode.commands.registerCommand('feedbackPanel.openInEditor', () => {
+    //         provider.openInEditor(context);
+    //     })
+    // );
 
 }
 

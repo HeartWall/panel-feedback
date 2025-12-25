@@ -18,28 +18,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'feedbackPanel.view';
     
     private _view?: vscode.WebviewView;
-    private _editorPanel?: vscode.WebviewPanel;
     private _pendingResolve?: (value: string) => void;
     private _currentMessage: string = '';
     private _currentOptions: string[] = [];
     private _currentRequestId?: string;
     private _chatHistory: ChatMessage[] = [];
     private _rules: string = '';
-    private _workspaceHash: string = '';  // 工作空间哈希值
-    private _workspaceName: string = '';  // 工作空间名称
-    private _onEndConversation?: () => void;  // 结束对话回调
-    private _inputHistory: InputHistoryItem[] = [];  // 输入历史记录
-    private static readonly MAX_INPUT_HISTORY = 10;  // 最大历史记录数
+    private _workspaceName: string = '';
+    private _onEndConversation?: () => void;
+    private _inputHistory: InputHistoryItem[] = [];
+    private static readonly MAX_INPUT_HISTORY = 10;
 
     constructor(private readonly _extensionUri: vscode.Uri) {
-        // 生成工作空间哈希值
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         this._workspaceName = vscode.workspace.workspaceFolders?.[0]?.name || '';
-        if (workspacePath) {
-            const crypto = require('crypto');
-            const hash = crypto.createHash('md5').update(workspacePath).digest('hex');
-            this._workspaceHash = hash.substring(0, 8);
-        }
     }
 
     private _extensionContext?: vscode.ExtensionContext;
@@ -56,14 +47,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this._extensionUri]
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, false);
-
-        // 侧边栏视图变为可见时，自动打开 tab 页
-        webviewView.onDidChangeVisibility(() => {
-            if (webviewView.visible && this._extensionContext) {
-                this.openInEditor(this._extensionContext);
-            }
-        });
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
         // 监听来自 webview 的消息
         webviewView.webview.onDidReceiveMessage(data => {
@@ -109,11 +93,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'getWorkspaceFiles':
                     this._handleGetWorkspaceFiles(data.query || '');
-                    break;
-                case 'openInEditor':
-                    if (this._extensionContext) {
-                        this.openInEditor(this._extensionContext);
-                    }
                     break;
                 case 'loadInputHistory':
                     this._loadInputHistory();
@@ -161,7 +140,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             const paths = uris.map(uri => uri.fsPath);
             const msgData = { type: 'fileSelected', paths };
             this._view?.webview.postMessage(msgData);
-            this._editorPanel?.webview.postMessage(msgData);
         }
     }
 
@@ -249,17 +227,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const files = await this._getWorkspaceFiles(query);
         const msgData = { type: 'workspaceFiles', files };
         this._view?.webview.postMessage(msgData);
-        this._editorPanel?.webview.postMessage(msgData);
     }
 
     private _sendWorkspaceInfo() {
         const msgData = { 
             type: 'workspaceInfo', 
-            workspaceHash: this._workspaceHash,
             workspaceName: this._workspaceName
         };
         this._view?.webview.postMessage(msgData);
-        this._editorPanel?.webview.postMessage(msgData);
     }
 
     private _checkForUpdates() {
@@ -450,11 +425,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const fs = require('fs');
         const path = require('path');
         const os = require('os');
-        // 使用工作空间哈希值隔离不同项目的 rules
         const rulesDir = path.join(os.homedir(), '.panel-feedback');
-        const rulesFile = this._workspaceHash 
-            ? path.join(rulesDir, `rules-${this._workspaceHash}.txt`)
-            : path.join(rulesDir, 'rules.txt');
+        const rulesFile = path.join(rulesDir, 'rules.txt');
         
         try {
             if (fs.existsSync(rulesFile)) {
@@ -466,7 +438,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         
         const msgData = { type: 'rulesLoaded', rules: this._rules };
         this._view?.webview.postMessage(msgData);
-        this._editorPanel?.webview.postMessage(msgData);
     }
 
     private _saveRules(rules: string) {
@@ -474,10 +445,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const path = require('path');
         const os = require('os');
         const rulesDir = path.join(os.homedir(), '.panel-feedback');
-        // 使用工作空间哈希值隔离不同项目的 rules
-        const rulesFile = this._workspaceHash 
-            ? path.join(rulesDir, `rules-${this._workspaceHash}.txt`)
-            : path.join(rulesDir, 'rules.txt');
+        const rulesFile = path.join(rulesDir, 'rules.txt');
         
         try {
             if (!fs.existsSync(rulesDir)) {
@@ -496,9 +464,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const os = require('os');
         const path = require('path');
         const historyDir = path.join(os.homedir(), '.panel-feedback');
-        return this._workspaceHash 
-            ? path.join(historyDir, `input-history-${this._workspaceHash}.json`)
-            : path.join(historyDir, 'input-history.json');
+        return path.join(historyDir, 'input-history.json');
     }
 
     private _loadInputHistory() {
@@ -600,7 +566,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _syncInputHistoryToAllWebviews() {
         const msgData = { type: 'inputHistoryLoaded', inputHistory: this._inputHistory };
         this._view?.webview.postMessage(msgData);
-        this._editorPanel?.webview.postMessage(msgData);
     }
     
     private _updateHistoryInView() {
@@ -611,9 +576,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             this._view.webview.postMessage(msgData);
         }
-        if (this._editorPanel) {
-            this._editorPanel.webview.postMessage(msgData);
-        }
     }
     
     // 设置结束对话回调
@@ -621,7 +583,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         this._onEndConversation = callback;
     }
 
-    // 设置扩展上下文（用于自动打开 tab 页）
+    // 设置扩展上下文
     public setExtensionContext(context: vscode.ExtensionContext) {
         this._extensionContext = context;
     }
@@ -645,19 +607,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         this._chatHistory = [];
         this._currentMessage = '';
         this._currentOptions = [];
-        // 发送重置消息到两个 webview
+        // 发送重置消息到 webview
         const msgData = { type: 'resetToEmpty' };
         if (this._view) {
             console.log('Sending resetToEmpty to sidebar');
             this._view.webview.postMessage(msgData);
         }
-        if (this._editorPanel) {
-            console.log('Sending resetToEmpty to editor panel');
-            this._editorPanel.webview.postMessage(msgData);
-        }
     }
 
-    // 同步状态到所有 webview
+    // 同步状态到 webview
     private _syncStateToAllWebviews() {
         const msgData = {
             type: 'showMessage',
@@ -668,16 +626,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             this._view.webview.postMessage(msgData);
         }
-        if (this._editorPanel) {
-            this._editorPanel.webview.postMessage(msgData);
-        }
     }
 
     public openSettings() {
         const msgData = { type: 'openSettings' };
-        if (this._editorPanel?.visible) {
-            this._editorPanel.webview.postMessage(msgData);
-        } else if (this._view) {
+        if (this._view) {
             this._view.webview.postMessage(msgData);
         }
     }
@@ -701,22 +654,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             history: this._chatHistory
         };
 
-        // 同步发送到两个 webview
-        if (this._editorPanel) {
-            this._editorPanel.reveal();
-            this._editorPanel.webview.postMessage(msgData);
-        }
-        if (this._view) {
-            this._view.webview.postMessage(msgData);
-        }
-        
-        // 如果两个都没有，尝试打开
-        if (!this._editorPanel && !this._view) {
+        // 如果边栏没有，尝试打开
+        if (!this._view) {
             await vscode.commands.executeCommand('feedbackPanel.view.focus');
             await new Promise(resolve => setTimeout(resolve, 500));
         }
-        // 再次检查并发送
-        if (this._view && !this._editorPanel) {
+        
+        // 发送到边栏 webview
+        if (this._view) {
             this._view.webview.postMessage(msgData);
         }
 
@@ -729,111 +674,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             this._view.webview.postMessage({ type: 'triggerSubmit' });
         }
-        if (this._editorPanel) {
-            this._editorPanel.webview.postMessage({ type: 'triggerSubmit' });
-        }
     }
 
-    public openInEditor(context: vscode.ExtensionContext) {
-        // 如果已经打开，直接显示
-        if (this._editorPanel) {
-            this._editorPanel.reveal();
-            return;
-        }
-
-        // 创建新的 WebviewPanel
-        this._editorPanel = vscode.window.createWebviewPanel(
-            'feedbackPanel.editor',
-            '💬 Panel Feedback',
-            vscode.ViewColumn.One,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [this._extensionUri]
-            }
-        );
-
-        this._editorPanel.webview.html = this._getHtmlForWebview(this._editorPanel.webview, true);
-
-        // 监听消息
-        this._editorPanel.webview.onDidReceiveMessage(data => {
-            switch (data.type) {
-                case 'submit':
-                    this._handleSubmit(data.value, data.images);
-                    break;
-                case 'optionSelected':
-                    this._handleSubmit(data.value, []);
-                    break;
-                case 'clearHistory':
-                    this.clearHistory();
-                    break;
-                case 'fixedAction':
-                    this._handleFixedAction(data.action, data.text);
-                    break;
-                case 'loadRules':
-                    this._loadRules();
-                    break;
-                case 'saveRules':
-                    this._saveRules(data.rules);
-                    break;
-                case 'getWorkspaceInfo':
-                    this._sendWorkspaceInfo();
-                    break;
-                case 'endConversation':
-                    this._handleEndConversation();
-                    break;
-                case 'copyToClipboard':
-                    vscode.env.clipboard.writeText(data.text);
-                    break;
-                case 'openLogFolder':
-                    this._openLogFolder();
-                    break;
-                case 'selectFile':
-                    this._handleSelectFile(data.selectType);
-                    break;
-                case 'getWorkspaceFiles':
-                    this._handleGetWorkspaceFiles(data.query || '');
-                    break;
-                case 'loadInputHistory':
-                    this._loadInputHistory();
-                    break;
-                case 'addInputHistory':
-                    this._addInputHistory(data.text);
-                    break;
-                case 'deleteInputHistory':
-                    this._deleteInputHistory(data.index);
-                    break;
-                case 'togglePinInputHistory':
-                    this._togglePinInputHistory(data.index);
-                    break;
-            }
-        }, undefined, context.subscriptions);
-
-        // 监听关闭事件
-        this._editorPanel.onDidDispose(() => {
-            this._editorPanel = undefined;
-        }, undefined, context.subscriptions);
-
-        // 同步当前状态
-        if (this._chatHistory.length > 0) {
-            this._editorPanel.webview.postMessage({
-                type: 'showMessage',
-                message: this._currentMessage,
-                options: this._currentOptions,
-                history: this._chatHistory
-            });
-        }
-    }
-
-    // 获取当前活跃的 webview
-    private _getActiveWebview(): vscode.Webview | undefined {
-        if (this._editorPanel?.visible) {
-            return this._editorPanel.webview;
-        }
-        return this._view?.webview;
-    }
-
-    private _getHtmlForWebview(webview: vscode.Webview, isEditorPanel: boolean = false): string {
+    private _getHtmlForWebview(webview: vscode.Webview): string {
         // 获取配置的最小宽度
         const config = vscode.workspace.getConfiguration('feedbackPanel');
         const minWidth = config.get<number>('minWidth', 280);
@@ -1833,13 +1676,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 <body>
     <!-- 顶部工具栏 -->
     <div class="top-toolbar">
-        <button class="toolbar-btn" id="openTabBtn" title="在编辑器中打开" style="display: ${isEditorPanel ? 'none' : 'flex'};">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                <polyline points="15 3 21 3 21 9"></polyline>
-                <line x1="10" y1="14" x2="21" y2="3"></line>
-            </svg>
-        </button>
         <button class="toolbar-btn" id="clearHistoryBtn" title="清除历史">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 6h18"></path>
@@ -1887,11 +1723,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
         </svg>
         <p>等待 AI 发起对话...</p>
-        <div id="workspaceInfo" class="workspace-info" style="display: none;">
-            <span class="workspace-label">路由标识：</span>
-            <code id="workspaceHashDisplay" class="workspace-hash"></code>
-            <button id="copyHashBtn" class="copy-hash-btn" title="复制哈希值">📋</button>
-        </div>
         <button id="startDialogBtn" class="start-dialog-btn" style="display: none;">开启对话</button>
     </div>
 
@@ -1989,16 +1820,12 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const rulesTextarea = document.getElementById('rulesTextarea');
         const saveRules = document.getElementById('saveRules');
         const settingsTabs = document.querySelectorAll('.settings-tab');
-        const openTabBtn = document.getElementById('openTabBtn');
         const clearHistoryBtn = document.getElementById('clearHistoryBtn');
         const settingsBtn = document.getElementById('settingsBtn');
 
         let images = [];
         let historyData = [];
         let currentRules = '';
-        
-        // 工作空间信息（需要先定义，后面会用到）
-        let workspaceHash = '';
         let workspaceName = '';
         
         // 输入历史记录（由后端统一管理）
@@ -2387,37 +2214,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         // 加载已保存的 rules
         vscode.postMessage({ type: 'loadRules' });
         
-        // 获取工作空间信息
-        vscode.postMessage({ type: 'getWorkspaceInfo' });
-        
-        // 工作空间信息元素
-        const workspaceInfo = document.getElementById('workspaceInfo');
-        const workspaceHashDisplay = document.getElementById('workspaceHashDisplay');
-        const copyHashBtn = document.getElementById('copyHashBtn');
-        
-        // 复制哈希值按钮
-        copyHashBtn.onclick = () => {
-            if (workspaceHash) {
-                vscode.postMessage({ type: 'copyToClipboard', text: workspaceHash });
-                copyHashBtn.textContent = '✓';
-                setTimeout(() => {
-                    copyHashBtn.textContent = '📋';
-                }, 1500);
-            }
-        };
-        
         // 开启对话按钮
         const startDialogBtn = document.getElementById('startDialogBtn');
         startDialogBtn.onclick = () => {
-            if (workspaceHash) {
-                const command = '使用 panel_feedback MCP 工具与我进行交互对话，workspace_hash 参数填写 "' + workspaceHash + '"';
-                vscode.postMessage({ type: 'copyToClipboard', text: command });
-                startDialogBtn.textContent = '已复制指令 ✓';
-                setTimeout(() => {
-                    startDialogBtn.textContent = '开启对话';
-                }, 2000);
-            }
+            const command = '使用 panel_feedback MCP 工具与我进行交互对话';
+            vscode.postMessage({ type: 'copyToClipboard', text: command });
+            startDialogBtn.textContent = '已复制指令 ✓';
+            setTimeout(() => {
+                startDialogBtn.textContent = '开启对话';
+            }, 2000);
         };
+        startDialogBtn.style.display = 'block';
         
         // 固定操作按钮事件（使用事件委托）
         fixedActions.addEventListener('click', (e) => {
@@ -2437,12 +2244,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         });
         
         // 工具栏按钮事件
-        if (openTabBtn) {
-            openTabBtn.addEventListener('click', () => {
-                vscode.postMessage({ type: 'openInEditor' });
-            });
-        }
-        
         clearHistoryBtn.addEventListener('click', () => {
             vscode.postMessage({ type: 'clearHistory' });
         });
@@ -2934,14 +2735,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     resetToEmpty();
                     break;
                 case 'workspaceInfo':
-                    workspaceHash = data.workspaceHash || '';
                     workspaceName = data.workspaceName || '';
-                    if (workspaceHash) {
-                        workspaceHashDisplay.textContent = workspaceHash;
-                        workspaceInfo.style.display = 'flex';
-                        startDialogBtn.style.display = 'block';
-                    }
-                    // 收到工作空间信息后加载历史
                     loadInputHistory();
                     break;
                 case 'workspaceFiles':
