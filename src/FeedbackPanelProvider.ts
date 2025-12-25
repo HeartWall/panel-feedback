@@ -6,6 +6,7 @@ interface ChatMessage {
     content: string;
     timestamp: number;
     images?: string[];
+    starred?: boolean;
 }
 
 interface InputHistoryItem {
@@ -14,9 +15,15 @@ interface InputHistoryItem {
     pinned: boolean;
 }
 
+interface QuickTemplate {
+    id: string;
+    title: string;
+    content: string;
+}
+
 export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'feedbackPanel.view';
-    
+
     private _view?: vscode.WebviewView;
     private _pendingResolve?: (value: string) => void;
     private _currentMessage: string = '';
@@ -28,6 +35,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _onEndConversation?: () => void;
     private _inputHistory: InputHistoryItem[] = [];
     private static readonly MAX_INPUT_HISTORY = 10;
+    private _quickTemplates: QuickTemplate[] = [];
+    private _starredMessages: ChatMessage[] = [];
 
     constructor(private readonly _extensionUri: vscode.Uri) {
         this._workspaceName = vscode.workspace.workspaceFolders?.[0]?.name || '';
@@ -48,6 +57,20 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        // 如果有待处理的请求，恢复显示当前消息
+        if (this._pendingResolve && this._currentMessage) {
+            console.log('[Panel] Restoring pending request on webview rebuild');
+            setTimeout(() => {
+                const msgData = {
+                    type: 'showMessage',
+                    message: this._currentMessage,
+                    options: this._currentOptions,
+                    history: this._chatHistory
+                };
+                this._view?.webview.postMessage(msgData);
+            }, 100);
+        }
 
         // 监听来自 webview 的消息
         webviewView.webview.onDidReceiveMessage(data => {
@@ -106,6 +129,30 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'togglePinInputHistory':
                     this._togglePinInputHistory(data.index);
                     break;
+                // ========== 对话导出 ==========
+                case 'exportConversation':
+                    this._handleExportConversation(data.format);
+                    break;
+                // ========== 快捷模板 ==========
+                case 'loadTemplates':
+                    this._loadTemplates();
+                    break;
+                case 'saveTemplate':
+                    this._addTemplate(data.template);
+                    break;
+                case 'deleteTemplate':
+                    this._deleteTemplate(data.id);
+                    break;
+                case 'updateTemplate':
+                    this._updateTemplate(data.id, data.template);
+                    break;
+                // ========== 消息收藏 ==========
+                case 'toggleStar':
+                    this._toggleStarMessage(data.timestamp);
+                    break;
+                case 'loadStarred':
+                    this._loadStarredMessages();
+                    break;
             }
         });
     }
@@ -125,7 +172,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     private async _handleSelectFile(selectType: 'file' | 'folder') {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
-        
+
         const options: vscode.OpenDialogOptions = {
             canSelectMany: true,
             canSelectFolders: selectType === 'folder',
@@ -133,9 +180,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             defaultUri: workspaceFolder,
             title: selectType === 'file' ? '选择文件' : '选择文件夹'
         };
-        
+
         const uris = await vscode.window.showOpenDialog(options);
-        
+
         if (uris && uris.length > 0) {
             const paths = uris.map(uri => uri.fsPath);
             const msgData = { type: 'fileSelected', paths };
@@ -150,7 +197,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
 
         const excludePatterns = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/out/**', '**/.vscode/**', '**/build/**', '**/*.vsix', '**/screenshots/**'];
-        
+
         try {
             // 增加文件数量限制以支持更多递归文件
             const files = await vscode.workspace.findFiles(
@@ -167,7 +214,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 const relativePath = path.relative(workspacePath, file.fsPath);
                 const fileName = path.basename(file.fsPath);
                 const depth = relativePath.split(path.sep).length;
-                
+
                 // 添加文件
                 if (!query || fileName.toLowerCase().includes(query.toLowerCase()) || relativePath.toLowerCase().includes(query.toLowerCase())) {
                     results.push({
@@ -230,8 +277,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     private _sendWorkspaceInfo() {
-        const msgData = { 
-            type: 'workspaceInfo', 
+        const msgData = {
+            type: 'workspaceInfo',
             workspaceName: this._workspaceName
         };
         this._view?.webview.postMessage(msgData);
@@ -241,18 +288,18 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const ext = vscode.extensions.getExtension('fhyfhy17.windsurf-feedback-panel');
         const currentVersion = ext?.packageJSON.version || '0.0.0';
         const isZh = vscode.env.language.startsWith('zh');
-        
+
         const https = require('https');
         const fs = require('fs');
         const os = require('os');
         const path = require('path');
-        
+
         const options = {
             hostname: 'api.github.com',
             path: '/repos/fhyfhy17/panel-feedback/releases/latest',
             headers: { 'User-Agent': 'VSCode-Extension' }
         };
-        
+
         https.get(options, (res: any) => {
             let data = '';
             res.on('data', (chunk: string) => data += chunk);
@@ -261,30 +308,30 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     const release = JSON.parse(data);
                     const latestVersion = release.tag_name?.replace('v', '') || '';
                     const hasUpdate = this._compareVersions(latestVersion, currentVersion) > 0;
-                    
+
                     // Find vsix asset
                     const vsixAsset = release.assets?.find((a: any) => a.name.endsWith('.vsix'));
-                    
-                    this._view?.webview.postMessage({ 
-                        type: 'updateResult', 
-                        hasUpdate, 
+
+                    this._view?.webview.postMessage({
+                        type: 'updateResult',
+                        hasUpdate,
                         latestVersion,
-                        downloadUrl: release.html_url 
+                        downloadUrl: release.html_url
                     });
-                    
+
                     if (hasUpdate && vsixAsset) {
-                        const msg = isZh 
-                            ? `🎉 Panel Feedback v${latestVersion} 可用！` 
+                        const msg = isZh
+                            ? `🎉 Panel Feedback v${latestVersion} 可用！`
                             : `🎉 Panel Feedback v${latestVersion} is available!`;
                         const installBtn = isZh ? '下载并安装' : 'Install';
                         const laterBtn = isZh ? '稍后' : 'Later';
-                        
+
                         vscode.window.showInformationMessage(msg, installBtn, laterBtn)
-                        .then(action => {
-                            if (action === installBtn) {
-                                this._downloadAndInstall(vsixAsset.browser_download_url, latestVersion, isZh);
-                            }
-                        });
+                            .then(action => {
+                                if (action === installBtn) {
+                                    this._downloadAndInstall(vsixAsset.browser_download_url, latestVersion, isZh);
+                                }
+                            });
                     } else if (hasUpdate) {
                         // No vsix asset, just open release page
                         vscode.env.openExternal(vscode.Uri.parse(release.html_url));
@@ -303,10 +350,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const fs = require('fs');
         const os = require('os');
         const path = require('path');
-        
+
         const tmpDir = os.tmpdir();
         const vsixPath = path.join(tmpDir, `windsurf-feedback-panel-${version}.vsix`);
-        
+
         const downloadMsg = isZh ? '正在下载更新...' : 'Downloading update...';
         vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
@@ -315,7 +362,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }, async () => {
             return new Promise<void>((resolve, reject) => {
                 const file = fs.createWriteStream(vsixPath);
-                
+
                 // Follow redirects
                 const download = (downloadUrl: string) => {
                     https.get(downloadUrl, { headers: { 'User-Agent': 'VSCode-Extension' } }, (res: any) => {
@@ -323,43 +370,43 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                             download(res.headers.location);
                             return;
                         }
-                        
+
                         res.pipe(file);
                         file.on('finish', () => {
                             file.close();
                             resolve();
                         });
                     }).on('error', (err: Error) => {
-                        fs.unlink(vsixPath, () => {});
+                        fs.unlink(vsixPath, () => { });
                         reject(err);
                     });
                 };
-                
+
                 download(url);
             });
         }).then(() => {
-            const successMsg = isZh 
-                ? `下载完成！是否立即安装 v${version}？` 
+            const successMsg = isZh
+                ? `下载完成！是否立即安装 v${version}？`
                 : `Download complete! Install v${version} now?`;
             const installBtn = isZh ? '安装并重启' : 'Install & Reload';
             const cancelBtn = isZh ? '取消' : 'Cancel';
-            
+
             vscode.window.showInformationMessage(successMsg, installBtn, cancelBtn)
-            .then(action => {
-                if (action === installBtn) {
-                    vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(vsixPath))
-                    .then(() => {
-                        const reloadMsg = isZh ? '安装成功！是否重新加载窗口？' : 'Installed! Reload window?';
-                        const reloadBtn = isZh ? '重新加载' : 'Reload';
-                        vscode.window.showInformationMessage(reloadMsg, reloadBtn)
-                        .then(action => {
-                            if (action === reloadBtn) {
-                                vscode.commands.executeCommand('workbench.action.reloadWindow');
-                            }
-                        });
-                    });
-                }
-            });
+                .then(action => {
+                    if (action === installBtn) {
+                        vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(vsixPath))
+                            .then(() => {
+                                const reloadMsg = isZh ? '安装成功！是否重新加载窗口？' : 'Installed! Reload window?';
+                                const reloadBtn = isZh ? '重新加载' : 'Reload';
+                                vscode.window.showInformationMessage(reloadMsg, reloadBtn)
+                                    .then(action => {
+                                        if (action === reloadBtn) {
+                                            vscode.commands.executeCommand('workbench.action.reloadWindow');
+                                        }
+                                    });
+                            });
+                    }
+                });
         }, () => {
             const errMsg = isZh ? '下载失败，请手动下载' : 'Download failed, please download manually';
             vscode.window.showErrorMessage(errMsg);
@@ -379,6 +426,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     private _handleSubmit(text: string, images: string[]) {
+        console.log(`[Panel] _handleSubmit called, hasPendingResolve: ${!!this._pendingResolve}, text length: ${text.length}`);
         if (this._pendingResolve) {
             // 记录用户回复到历史（显示原始内容）
             this._chatHistory.push({
@@ -388,10 +436,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 images: images.length > 0 ? images : undefined
             });
             this._updateHistoryInView();
-            
+
             // 附加 rules 后发送给 AI
             const finalText = this._appendRules(text);
-            const result = images.length > 0 
+            const result = images.length > 0
                 ? JSON.stringify({ text: finalText, images })
                 : finalText;
             this._pendingResolve(result);
@@ -427,7 +475,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const os = require('os');
         const rulesDir = path.join(os.homedir(), '.panel-feedback');
         const rulesFile = path.join(rulesDir, 'rules.txt');
-        
+
         try {
             if (fs.existsSync(rulesFile)) {
                 this._rules = fs.readFileSync(rulesFile, 'utf-8');
@@ -435,7 +483,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         } catch (e) {
             console.error('Failed to load rules:', e);
         }
-        
+
         const msgData = { type: 'rulesLoaded', rules: this._rules };
         this._view?.webview.postMessage(msgData);
     }
@@ -446,7 +494,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const os = require('os');
         const rulesDir = path.join(os.homedir(), '.panel-feedback');
         const rulesFile = path.join(rulesDir, 'rules.txt');
-        
+
         try {
             if (!fs.existsSync(rulesDir)) {
                 fs.mkdirSync(rulesDir, { recursive: true });
@@ -459,7 +507,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     // ========== 输入历史管理 ==========
-    
+
     private _getInputHistoryFilePath(): string {
         const os = require('os');
         const path = require('path');
@@ -470,7 +518,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _loadInputHistory() {
         const fs = require('fs');
         const historyFile = this._getInputHistoryFilePath();
-        
+
         try {
             if (fs.existsSync(historyFile)) {
                 const data = fs.readFileSync(historyFile, 'utf-8');
@@ -480,7 +528,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             console.error('Failed to load input history:', e);
             this._inputHistory = [];
         }
-        
+
         this._syncInputHistoryToAllWebviews();
     }
 
@@ -490,7 +538,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const path = require('path');
         const historyDir = path.join(os.homedir(), '.panel-feedback');
         const historyFile = this._getInputHistoryFilePath();
-        
+
         try {
             if (!fs.existsSync(historyDir)) {
                 fs.mkdirSync(historyDir, { recursive: true });
@@ -503,7 +551,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     private _addInputHistory(text: string) {
         if (!text || !text.trim()) return;
-        
+
         // 检查是否已存在
         const existingIndex = this._inputHistory.findIndex(item => item.text === text);
         if (existingIndex !== -1) {
@@ -531,14 +579,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 this._inputHistory.splice(firstNonPinnedIndex, 0, newItem);
             }
         }
-        
+
         // 限制数量：置顶项不计入限制
         const pinnedItems = this._inputHistory.filter(item => item.pinned);
         const nonPinnedItems = this._inputHistory.filter(item => !item.pinned);
         if (nonPinnedItems.length > FeedbackPanelProvider.MAX_INPUT_HISTORY) {
             this._inputHistory = [...pinnedItems, ...nonPinnedItems.slice(0, FeedbackPanelProvider.MAX_INPUT_HISTORY)];
         }
-        
+
         this._saveInputHistory();
         this._syncInputHistoryToAllWebviews();
     }
@@ -567,7 +615,221 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const msgData = { type: 'inputHistoryLoaded', inputHistory: this._inputHistory };
         this._view?.webview.postMessage(msgData);
     }
-    
+
+    // ========== 对话导出功能 ==========
+
+    private async _handleExportConversation(format: 'md' | 'json') {
+        if (this._chatHistory.length === 0) {
+            vscode.window.showWarningMessage('没有可导出的对话记录');
+            return;
+        }
+
+        const defaultName = `conversation-${new Date().toISOString().slice(0, 10)}`;
+        const ext = format === 'md' ? 'md' : 'json';
+
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(`${defaultName}.${ext}`),
+            filters: format === 'md'
+                ? { 'Markdown': ['md'] }
+                : { 'JSON': ['json'] }
+        });
+
+        if (!uri) return;
+
+        const fs = require('fs');
+        let content: string;
+
+        if (format === 'md') {
+            content = this._generateMarkdownExport();
+        } else {
+            content = JSON.stringify({
+                exportedAt: new Date().toISOString(),
+                workspace: this._workspaceName,
+                messages: this._chatHistory
+            }, null, 2);
+        }
+
+        try {
+            fs.writeFileSync(uri.fsPath, content, 'utf-8');
+            vscode.window.showInformationMessage(`对话已导出到: ${uri.fsPath}`);
+        } catch (e) {
+            vscode.window.showErrorMessage(`导出失败: ${e}`);
+        }
+    }
+
+    private _generateMarkdownExport(): string {
+        const lines: string[] = [
+            '# 对话记录',
+            '',
+            `> 导出时间: ${new Date().toLocaleString()}`,
+            `> 工作区: ${this._workspaceName || '未知'}`,
+            '',
+            '---',
+            ''
+        ];
+
+        for (const msg of this._chatHistory) {
+            const time = new Date(msg.timestamp).toLocaleString();
+            const role = msg.role === 'ai' ? '🤖 AI' : '👤 用户';
+            lines.push(`## ${role}`);
+            lines.push(`*${time}*`);
+            lines.push('');
+            lines.push(msg.content);
+            if (msg.images && msg.images.length > 0) {
+                lines.push('');
+                lines.push(`*[包含 ${msg.images.length} 张图片]*`);
+            }
+            lines.push('');
+            lines.push('---');
+            lines.push('');
+        }
+
+        return lines.join('\n');
+    }
+
+    // ========== 快捷模板功能 ==========
+
+    private _getTemplatesFilePath(): string {
+        const os = require('os');
+        const path = require('path');
+        const dir = path.join(os.homedir(), '.panel-feedback');
+        return path.join(dir, 'templates.json');
+    }
+
+    private _loadTemplates() {
+        const fs = require('fs');
+        const filePath = this._getTemplatesFilePath();
+
+        try {
+            if (fs.existsSync(filePath)) {
+                const data = fs.readFileSync(filePath, 'utf-8');
+                this._quickTemplates = JSON.parse(data);
+            }
+        } catch (e) {
+            console.error('Failed to load templates:', e);
+            this._quickTemplates = [];
+        }
+
+        this._view?.webview.postMessage({ type: 'templatesLoaded', templates: this._quickTemplates });
+    }
+
+    private _saveTemplates() {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const dir = path.join(os.homedir(), '.panel-feedback');
+        const filePath = this._getTemplatesFilePath();
+
+        try {
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(filePath, JSON.stringify(this._quickTemplates, null, 2), 'utf-8');
+        } catch (e) {
+            console.error('Failed to save templates:', e);
+        }
+    }
+
+    private _addTemplate(template: { title: string; content: string }) {
+        const newTemplate: QuickTemplate = {
+            id: Date.now().toString(),
+            title: template.title,
+            content: template.content
+        };
+        this._quickTemplates.push(newTemplate);
+        this._saveTemplates();
+        this._view?.webview.postMessage({ type: 'templatesLoaded', templates: this._quickTemplates });
+    }
+
+    private _deleteTemplate(id: string) {
+        this._quickTemplates = this._quickTemplates.filter(t => t.id !== id);
+        this._saveTemplates();
+        this._view?.webview.postMessage({ type: 'templatesLoaded', templates: this._quickTemplates });
+    }
+
+    private _updateTemplate(id: string, template: { title: string; content: string }) {
+        const index = this._quickTemplates.findIndex(t => t.id === id);
+        if (index !== -1) {
+            this._quickTemplates[index] = { ...this._quickTemplates[index], ...template };
+            this._saveTemplates();
+            this._view?.webview.postMessage({ type: 'templatesLoaded', templates: this._quickTemplates });
+        }
+    }
+
+    // ========== 消息收藏功能 ==========
+
+    private _getStarredFilePath(): string {
+        const os = require('os');
+        const path = require('path');
+        const dir = path.join(os.homedir(), '.panel-feedback');
+        return path.join(dir, 'starred.json');
+    }
+
+    private _loadStarredMessages() {
+        const fs = require('fs');
+        const filePath = this._getStarredFilePath();
+
+        try {
+            if (fs.existsSync(filePath)) {
+                const data = fs.readFileSync(filePath, 'utf-8');
+                this._starredMessages = JSON.parse(data);
+            }
+        } catch (e) {
+            console.error('Failed to load starred messages:', e);
+            this._starredMessages = [];
+        }
+
+        this._view?.webview.postMessage({ type: 'starredLoaded', starred: this._starredMessages });
+    }
+
+    private _saveStarredMessages() {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const dir = path.join(os.homedir(), '.panel-feedback');
+        const filePath = this._getStarredFilePath();
+
+        try {
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(filePath, JSON.stringify(this._starredMessages, null, 2), 'utf-8');
+        } catch (e) {
+            console.error('Failed to save starred messages:', e);
+        }
+    }
+
+    private _toggleStarMessage(timestamp: number) {
+        // 检查是否已收藏
+        const starredIndex = this._starredMessages.findIndex(m => m.timestamp === timestamp);
+
+        if (starredIndex !== -1) {
+            // 取消收藏
+            this._starredMessages.splice(starredIndex, 1);
+        } else {
+            // 添加收藏
+            const message = this._chatHistory.find(m => m.timestamp === timestamp);
+            if (message) {
+                this._starredMessages.push({ ...message, starred: true });
+            }
+        }
+
+        // 更新当前对话历史中的收藏状态
+        const msgInHistory = this._chatHistory.find(m => m.timestamp === timestamp);
+        if (msgInHistory) {
+            msgInHistory.starred = starredIndex === -1;
+        }
+
+        this._saveStarredMessages();
+        this._view?.webview.postMessage({
+            type: 'starToggled',
+            timestamp,
+            starred: starredIndex === -1,
+            starredMessages: this._starredMessages
+        });
+    }
+
+
     private _updateHistoryInView() {
         const msgData = {
             type: 'updateHistory',
@@ -577,7 +839,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             this._view.webview.postMessage(msgData);
         }
     }
-    
+
     // 设置结束对话回调
     public setOnEndConversation(callback: () => void) {
         this._onEndConversation = callback;
@@ -587,7 +849,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public setExtensionContext(context: vscode.ExtensionContext) {
         this._extensionContext = context;
     }
-    
+
     private _handleEndConversation() {
         console.log('End conversation triggered, pendingResolve:', !!this._pendingResolve);
         // 结束对话：向 AI 发送结束信号
@@ -601,7 +863,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         // 清除历史并重置 UI
         this.clearHistory();
     }
-    
+
     public clearHistory() {
         console.log('clearHistory called');
         this._chatHistory = [];
@@ -636,6 +898,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     public async showMessage(message: string, options?: string[], requestId?: string): Promise<string> {
+        console.log(`[Panel] showMessage called, requestId: ${requestId}, message length: ${message.length}`);
+
         this._currentMessage = message;
         this._currentOptions = options || [];
         this._currentRequestId = requestId;
@@ -654,19 +918,26 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             history: this._chatHistory
         };
 
-        // 如果边栏没有，尝试打开
-        if (!this._view) {
+        // 尝试多次确保 webview 可用
+        let retries = 0;
+        while (!this._view && retries < 3) {
+            console.log(`[Panel] Webview not available, attempting to open (retry ${retries + 1})`);
             await vscode.commands.executeCommand('feedbackPanel.view.focus');
             await new Promise(resolve => setTimeout(resolve, 500));
+            retries++;
         }
-        
+
         // 发送到边栏 webview
         if (this._view) {
+            console.log('[Panel] Sending message to webview');
             this._view.webview.postMessage(msgData);
+        } else {
+            console.error('[Panel] ERROR: Webview still not available after retries');
         }
 
         return new Promise((resolve) => {
             this._pendingResolve = resolve;
+            console.log('[Panel] Waiting for user response...');
         });
     }
 
@@ -680,7 +951,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         // 获取配置的最小宽度
         const config = vscode.workspace.getConfiguration('feedbackPanel');
         const minWidth = config.get<number>('minWidth', 280);
-        
+
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1671,11 +1942,232 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 transform: scale(1);
             }
         }
+        
+        /* 导出菜单样式 */
+        .export-menu {
+            position: fixed;
+            top: 40px;
+            left: 8px;
+            background: var(--vscode-menu-background);
+            border: 1px solid var(--vscode-menu-border);
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 200;
+            min-width: 160px;
+        }
+        .export-menu.hidden {
+            display: none;
+        }
+        .export-menu-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.15s;
+        }
+        .export-menu-item:first-child {
+            border-radius: 6px 6px 0 0;
+        }
+        .export-menu-item:last-child {
+            border-radius: 0 0 6px 6px;
+        }
+        .export-menu-item:hover {
+            background: var(--vscode-menu-selectionBackground);
+            color: var(--vscode-menu-selectionForeground);
+        }
+        
+        /* 模板管理样式 */
+        .template-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .template-input {
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .template-textarea {
+            min-height: 60px;
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-size: 13px;
+            resize: vertical;
+            font-family: inherit;
+        }
+        .template-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .template-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 6px;
+            gap: 8px;
+        }
+        .template-item-content {
+            flex: 1;
+            min-width: 0;
+        }
+        .template-item-title {
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--vscode-foreground);
+        }
+        .template-item-preview {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .template-item-actions {
+            display: flex;
+            gap: 4px;
+        }
+        .template-item-btn {
+            padding: 4px 8px;
+            border: none;
+            background: transparent;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0.7;
+            transition: all 0.15s;
+        }
+        .template-item-btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        .template-item-btn.delete:hover {
+            color: var(--vscode-errorForeground);
+        }
+        
+        /* 模板选择弹出菜单 */
+        .template-popup {
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            margin-bottom: 4px;
+            background: var(--vscode-menu-background);
+            border: 1px solid var(--vscode-menu-border);
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 100;
+            min-width: 200px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .template-popup.hidden {
+            display: none;
+        }
+        .template-popup-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 13px;
+            border-bottom: 1px solid var(--vscode-widget-border);
+        }
+        .template-popup-item:last-child {
+            border-bottom: none;
+        }
+        .template-popup-item:hover {
+            background: var(--vscode-menu-selectionBackground);
+        }
+        .template-popup-empty {
+            padding: 12px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
+        }
+        
+        /* 收藏列表样式 */
+        .starred-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .starred-item {
+            padding: 12px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .starred-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .starred-item-time {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+        .starred-item-content {
+            font-size: 13px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .starred-empty {
+            text-align: center;
+            padding: 24px;
+            color: var(--vscode-descriptionForeground);
+        }
+        
+        /* 消息收藏按钮 */
+        .star-btn {
+            position: absolute;
+            top: 4px;
+            right: 28px;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            opacity: 0.5;
+            transition: all 0.15s;
+            padding: 4px;
+        }
+        .star-btn:hover {
+            opacity: 1;
+            transform: scale(1.1);
+        }
+        .star-btn.starred {
+            opacity: 1;
+            color: #FFD700;
+        }
+        .chat-bubble {
+            position: relative;
+        }
     </style>
 </head>
 <body>
     <!-- 顶部工具栏 -->
     <div class="top-toolbar">
+        <button class="toolbar-btn" id="exportBtn" title="导出对话">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+        </button>
+        <button class="toolbar-btn" id="starredBtn" title="查看收藏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+            </svg>
+        </button>
         <button class="toolbar-btn" id="clearHistoryBtn" title="清除历史">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 6h18"></path>
@@ -1703,6 +2195,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             
             <div class="settings-tabs">
                 <button class="settings-tab active" data-tab="rules">📝 Rules</button>
+                <button class="settings-tab" data-tab="templates">📋 模板</button>
                 <button class="settings-tab" data-tab="actions">⚡ 快捷操作</button>
             </div>
             
@@ -1712,9 +2205,36 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 <button class="settings-action" id="saveRules">💾 保存</button>
             </div>
             
+            <div class="settings-tab-content hidden" id="tab-templates">
+                <div class="settings-hint">创建常用回复模板，一键发送</div>
+                <div class="template-form">
+                    <input type="text" id="templateTitle" placeholder="模板标题" class="template-input">
+                    <textarea id="templateContent" placeholder="模板内容..." class="template-textarea"></textarea>
+                    <button class="settings-action" id="addTemplate">➕ 添加模板</button>
+                </div>
+                <div id="templateList" class="template-list"></div>
+            </div>
+            
             <div class="settings-tab-content hidden" id="tab-actions">
                 <div class="settings-hint">管理固定的快捷操作按钮（开发中）</div>
             </div>
+        </div>
+    </div>
+
+    <!-- 导出菜单 -->
+    <div id="exportMenu" class="export-menu hidden">
+        <div class="export-menu-item" data-format="md">📄 导出为 Markdown</div>
+        <div class="export-menu-item" data-format="json">📋 导出为 JSON</div>
+    </div>
+
+    <!-- 收藏列表模态框 -->
+    <div id="starredModal" class="settings-modal">
+        <div class="settings-content">
+            <div class="settings-title">
+                <span>⭐ 收藏的消息</span>
+                <button class="settings-close" id="closeStarred">×</button>
+            </div>
+            <div id="starredList" class="starred-list"></div>
         </div>
     </div>
 
@@ -2336,7 +2856,10 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 
                 let content = '';
                 if (msg.role === 'ai') {
-                    content = '<div class="message">' + renderMarkdown(msg.content) + '</div>';
+                    // 检查是否已收藏
+                    const isStarred = starredMessages.some(s => s.timestamp === msg.timestamp);
+                    content = '<button class="star-btn' + (isStarred ? ' starred' : '') + '" data-timestamp="' + msg.timestamp + '" title="收藏">' + (isStarred ? '★' : '☆') + '</button>';
+                    content += '<div class="message">' + renderMarkdown(msg.content) + '</div>';
                 } else {
                     content = '<div>' + (msg.content || '<em>(empty)</em>') + '</div>';
                     if (msg.images && msg.images.length > 0) {
@@ -2350,6 +2873,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 content += '<div class="timestamp">' + formatTime(msg.timestamp) + '</div>';
                 
                 bubble.innerHTML = content;
+                
+                // 绑定收藏按钮事件
+                const starBtn = bubble.querySelector('.star-btn');
+                if (starBtn) {
+                    starBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        const timestamp = parseInt(starBtn.dataset.timestamp);
+                        vscode.postMessage({ type: 'toggleStar', timestamp });
+                    };
+                }
+                
                 chatHistory.appendChild(bubble);
             });
             
@@ -2708,6 +3242,140 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             }
         };
 
+        // ========== 导出功能 ==========
+        const exportBtn = document.getElementById('exportBtn');
+        const exportMenu = document.getElementById('exportMenu');
+        
+        exportBtn.onclick = (e) => {
+            e.stopPropagation();
+            exportMenu.classList.toggle('hidden');
+        };
+        
+        document.querySelectorAll('.export-menu-item').forEach(item => {
+            item.onclick = () => {
+                const format = item.dataset.format;
+                vscode.postMessage({ type: 'exportConversation', format });
+                exportMenu.classList.add('hidden');
+            };
+        });
+        
+        document.addEventListener('click', () => {
+            exportMenu.classList.add('hidden');
+        });
+
+        // ========== 模板功能 ==========
+        let templates = [];
+        const templateList = document.getElementById('templateList');
+        const templateTitleInput = document.getElementById('templateTitle');
+        const templateContentInput = document.getElementById('templateContent');
+        const addTemplateBtn = document.getElementById('addTemplate');
+        
+        // 加载模板
+        vscode.postMessage({ type: 'loadTemplates' });
+        
+        function renderTemplateList() {
+            if (templates.length === 0) {
+                templateList.innerHTML = '<div class="template-popup-empty">暂无模板</div>';
+                return;
+            }
+            templateList.innerHTML = templates.map(t => \`
+                <div class="template-item" data-id="\${t.id}">
+                    <div class="template-item-content">
+                        <div class="template-item-title">\${escapeHtml(t.title)}</div>
+                        <div class="template-item-preview">\${escapeHtml(t.content.substring(0, 50))}\${t.content.length > 50 ? '...' : ''}</div>
+                    </div>
+                    <div class="template-item-actions">
+                        <button class="template-item-btn use-btn" title="使用">📤</button>
+                        <button class="template-item-btn delete delete-btn" title="删除">🗑️</button>
+                    </div>
+                </div>
+            \`).join('');
+            
+            // 绑定事件
+            templateList.querySelectorAll('.use-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    const id = e.target.closest('.template-item').dataset.id;
+                    const template = templates.find(t => t.id === id);
+                    if (template) {
+                        feedbackInput.value = template.content;
+                        feedbackInput.focus();
+                        settingsModal.classList.remove('show');
+                    }
+                };
+            });
+            
+            templateList.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    const id = e.target.closest('.template-item').dataset.id;
+                    vscode.postMessage({ type: 'deleteTemplate', id });
+                };
+            });
+        }
+        
+        addTemplateBtn.onclick = () => {
+            const title = templateTitleInput.value.trim();
+            const content = templateContentInput.value.trim();
+            if (!title || !content) return;
+            
+            vscode.postMessage({ type: 'saveTemplate', template: { title, content } });
+            templateTitleInput.value = '';
+            templateContentInput.value = '';
+        };
+
+        // ========== 收藏功能 ==========
+        let starredMessages = [];
+        const starredBtn = document.getElementById('starredBtn');
+        const starredModal = document.getElementById('starredModal');
+        const starredList = document.getElementById('starredList');
+        const closeStarredBtn = document.getElementById('closeStarred');
+        
+        // 加载收藏
+        vscode.postMessage({ type: 'loadStarred' });
+        
+        starredBtn.onclick = () => {
+            renderStarredList();
+            starredModal.classList.add('show');
+        };
+        
+        closeStarredBtn.onclick = () => {
+            starredModal.classList.remove('show');
+        };
+        
+        starredModal.onclick = (e) => {
+            if (e.target === starredModal) {
+                starredModal.classList.remove('show');
+            }
+        };
+        
+        function renderStarredList() {
+            if (starredMessages.length === 0) {
+                starredList.innerHTML = '<div class="starred-empty">暂无收藏的消息</div>';
+                return;
+            }
+            starredList.innerHTML = starredMessages.map(msg => \`
+                <div class="starred-item" data-timestamp="\${msg.timestamp}">
+                    <div class="starred-item-header">
+                        <span class="starred-item-time">\${new Date(msg.timestamp).toLocaleString()}</span>
+                        <button class="template-item-btn delete unstar-btn" title="取消收藏">⭐</button>
+                    </div>
+                    <div class="starred-item-content">\${escapeHtml(msg.content.substring(0, 200))}\${msg.content.length > 200 ? '...' : ''}</div>
+                </div>
+            \`).join('');
+            
+            starredList.querySelectorAll('.unstar-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    const timestamp = parseInt(e.target.closest('.starred-item').dataset.timestamp);
+                    vscode.postMessage({ type: 'toggleStar', timestamp });
+                };
+            });
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         // 监听来自扩展的消息
         window.addEventListener('message', event => {
             const data = event.data;
@@ -2760,6 +3428,29 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     // 接收后端同步的输入历史
                     inputHistory = data.inputHistory || [];
                     renderInputHistory();
+                    break;
+                // ========== 新功能消息处理 ==========
+                case 'templatesLoaded':
+                    templates = data.templates || [];
+                    renderTemplateList();
+                    break;
+                case 'starredLoaded':
+                    starredMessages = data.starred || [];
+                    break;
+                case 'starToggled':
+                    starredMessages = data.starredMessages || [];
+                    // 更新当前显示的消息收藏状态
+                    const starBtn = document.querySelector(\`.star-btn[data-timestamp="\${data.timestamp}"]\`);
+                    if (starBtn) {
+                        if (data.starred) {
+                            starBtn.classList.add('starred');
+                            starBtn.textContent = '★';
+                        } else {
+                            starBtn.classList.remove('starred');
+                            starBtn.textContent = '☆';
+                        }
+                    }
+                    renderStarredList();
                     break;
             }
         });
