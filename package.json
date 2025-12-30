@@ -2,7 +2,7 @@
   "name": "windsurf-feedback-panel",
   "displayName": "Windsurf Feedback Panel",
   "description": "侧边栏交互反馈面板，支持 MCP 协议",
-  "version": "2.0.0",
+  "version": "2.0.3",
   "publisher": "fhyfhy17",
   "repository": {
     "type": "git",
@@ -87,7 +87,9 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "prepackage": "npm version patch --no-git-tag-version && node -e \"const fs=require('fs');if(!fs.existsSync('release'))fs.mkdirSync('release')\"",
+    "package": "vsce package -o release/",
+    "postpackage": "node -e \"const fs=require('fs'),p=require('path'),d='release';if(fs.existsSync(d)){const f=fs.readdirSync(d).filter(x=>x.endsWith('.vsix')).map(x=>({n:x,t:fs.statSync(p.join(d,x)).mtimeMs})).sort((a,b)=>b.t-a.t);f.slice(5).forEach(x=>fs.unlinkSync(p.join(d,x.n)))}\""
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
