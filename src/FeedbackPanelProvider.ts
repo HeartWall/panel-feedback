@@ -2,11 +2,17 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 
 interface ChatMessage {
+    id: string;
     role: 'ai' | 'user';
     content: string;
     timestamp: number;
     images?: string[];
     starred?: boolean;
+}
+
+// 生成唯一 ID
+function generateId(): string {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
 interface InputHistoryItem {
@@ -21,6 +27,12 @@ interface QuickTemplate {
     content: string;
 }
 
+interface RuleItem {
+    id: string;
+    content: string;
+    enabled: boolean;
+}
+
 export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'feedbackPanel.view';
 
@@ -30,7 +42,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     private _currentOptions: string[] = [];
     private _currentRequestId?: string;
     private _chatHistory: ChatMessage[] = [];
-    private _rules: string = '';
+    private _rules: RuleItem[] = [];
     private _workspaceName: string = '';
     private _onEndConversation?: () => void;
     private _inputHistory: InputHistoryItem[] = [];
@@ -93,6 +105,18 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'saveRules':
                     this._saveRules(data.rules);
                     break;
+                case 'addRule':
+                    this._addRule(data.content);
+                    break;
+                case 'deleteRule':
+                    this._deleteRule(data.id);
+                    break;
+                case 'toggleRule':
+                    this._toggleRule(data.id);
+                    break;
+                case 'updateRule':
+                    this._updateRule(data.id, data.content);
+                    break;
                 case 'getVersion':
                     this._sendVersionInfo();
                     break;
@@ -148,10 +172,13 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 // ========== 消息收藏 ==========
                 case 'toggleStar':
-                    this._toggleStarMessage(data.timestamp);
+                    this._toggleStarMessage(data.msgId);
                     break;
                 case 'loadStarred':
                     this._loadStarredMessages();
+                    break;
+                case 'openStarredInEditor':
+                    vscode.commands.executeCommand('feedbackPanel.openStarredInEditor');
                     break;
             }
         });
@@ -430,6 +457,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._pendingResolve) {
             // 记录用户回复到历史（显示原始内容）
             this._chatHistory.push({
+                id: generateId(),
                 role: 'user',
                 content: text,
                 timestamp: Date.now(),
@@ -452,6 +480,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         if (this._pendingResolve) {
             const finalText = this._appendRules(text);
             this._chatHistory.push({
+                id: generateId(),
                 role: 'user',
                 content: text,
                 timestamp: Date.now()
@@ -463,66 +492,123 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     }
 
     private _appendRules(text: string): string {
-        if (this._rules) {
-            return `${text}\n\n---\n[Rules/Memory]:\n${this._rules}`;
+        const enabledRules = this._rules.filter(r => r.enabled).map(r => r.content);
+        if (enabledRules.length > 0) {
+            return `${text}\n\n---\n[Rules/Memory]:\n${enabledRules.join('\n')}`;
         }
         return text;
     }
 
+    private _getWorkspaceDataDir(): string | null {
+        const fs = require('fs');
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) return null;
+        const dir = path.join(workspaceFolder.uri.fsPath, '.panel-feedback');
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        return dir;
+    }
+
     private _loadRules() {
         const fs = require('fs');
-        const path = require('path');
-        const os = require('os');
-        const rulesDir = path.join(os.homedir(), '.panel-feedback');
-        const rulesFile = path.join(rulesDir, 'rules.txt');
+        const dataDir = this._getWorkspaceDataDir();
+        if (!dataDir) {
+            this._rules = [];
+            this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
+            return;
+        }
+        const rulesFile = path.join(dataDir, 'rules.json');
 
         try {
             if (fs.existsSync(rulesFile)) {
-                this._rules = fs.readFileSync(rulesFile, 'utf-8');
+                const data = fs.readFileSync(rulesFile, 'utf-8');
+                this._rules = JSON.parse(data);
+            } else {
+                this._rules = [];
             }
         } catch (e) {
             console.error('Failed to load rules:', e);
+            this._rules = [];
         }
 
-        const msgData = { type: 'rulesLoaded', rules: this._rules };
-        this._view?.webview.postMessage(msgData);
+        this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
     }
 
-    private _saveRules(rules: string) {
+    private _saveRules(rules: RuleItem[]) {
         const fs = require('fs');
-        const path = require('path');
-        const os = require('os');
-        const rulesDir = path.join(os.homedir(), '.panel-feedback');
-        const rulesFile = path.join(rulesDir, 'rules.txt');
+        const dataDir = this._getWorkspaceDataDir();
+        if (!dataDir) return;
+        const rulesFile = path.join(dataDir, 'rules.json');
 
         try {
-            if (!fs.existsSync(rulesDir)) {
-                fs.mkdirSync(rulesDir, { recursive: true });
-            }
-            fs.writeFileSync(rulesFile, rules, 'utf-8');
+            fs.writeFileSync(rulesFile, JSON.stringify(rules, null, 2), 'utf-8');
             this._rules = rules;
         } catch (e) {
             console.error('Failed to save rules:', e);
         }
     }
 
+    private _addRule(content: string) {
+        if (!content || !content.trim()) return;
+        const newRule: RuleItem = {
+            id: Date.now().toString(),
+            content: content.trim(),
+            enabled: true
+        };
+        this._rules.push(newRule);
+        this._saveRules(this._rules);
+        this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
+    }
+
+    private _deleteRule(id: string) {
+        this._rules = this._rules.filter(r => r.id !== id);
+        this._saveRules(this._rules);
+        this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
+    }
+
+    private _toggleRule(id: string) {
+        const rule = this._rules.find(r => r.id === id);
+        if (rule) {
+            rule.enabled = !rule.enabled;
+            this._saveRules(this._rules);
+            this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
+        }
+    }
+
+    private _updateRule(id: string, content: string) {
+        const rule = this._rules.find(r => r.id === id);
+        if (rule && content && content.trim()) {
+            rule.content = content.trim();
+            this._saveRules(this._rules);
+            this._view?.webview.postMessage({ type: 'rulesLoaded', rules: this._rules });
+        }
+    }
+
     // ========== 输入历史管理 ==========
 
-    private _getInputHistoryFilePath(): string {
-        const os = require('os');
-        const path = require('path');
-        const historyDir = path.join(os.homedir(), '.panel-feedback');
-        return path.join(historyDir, 'input-history.json');
+    private _getInputHistoryFilePath(): string | null {
+        const dataDir = this._getWorkspaceDataDir();
+        if (!dataDir) return null;
+        return path.join(dataDir, 'input-history.json');
     }
 
     private _loadInputHistory() {
         const fs = require('fs');
         const historyFile = this._getInputHistoryFilePath();
 
+        if (!historyFile) {
+            this._inputHistory = [];
+            this._syncInputHistoryToAllWebviews();
+            return;
+        }
+
         try {
             if (fs.existsSync(historyFile)) {
                 const data = fs.readFileSync(historyFile, 'utf-8');
                 this._inputHistory = JSON.parse(data);
+            } else {
+                this._inputHistory = [];
             }
         } catch (e) {
             console.error('Failed to load input history:', e);
@@ -534,16 +620,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     private _saveInputHistory() {
         const fs = require('fs');
-        const os = require('os');
-        const path = require('path');
-        const historyDir = path.join(os.homedir(), '.panel-feedback');
         const historyFile = this._getInputHistoryFilePath();
+        if (!historyFile) return;
 
         try {
-            if (!fs.existsSync(historyDir)) {
-                fs.mkdirSync(historyDir, { recursive: true });
-            }
-            fs.writeFileSync(historyFile, JSON.stringify(this._inputHistory), 'utf-8');
+            fs.writeFileSync(historyFile, JSON.stringify(this._inputHistory, null, 2), 'utf-8');
         } catch (e) {
             console.error('Failed to save input history:', e);
         }
@@ -758,21 +839,28 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     // ========== 消息收藏功能 ==========
 
-    private _getStarredFilePath(): string {
-        const os = require('os');
-        const path = require('path');
-        const dir = path.join(os.homedir(), '.panel-feedback');
-        return path.join(dir, 'starred.json');
+    private _getStarredFilePath(): string | null {
+        const dataDir = this._getWorkspaceDataDir();
+        if (!dataDir) return null;
+        return path.join(dataDir, 'starred.json');
     }
 
     private _loadStarredMessages() {
         const fs = require('fs');
         const filePath = this._getStarredFilePath();
 
+        if (!filePath) {
+            this._starredMessages = [];
+            this._view?.webview.postMessage({ type: 'starredLoaded', starred: this._starredMessages });
+            return;
+        }
+
         try {
             if (fs.existsSync(filePath)) {
                 const data = fs.readFileSync(filePath, 'utf-8');
                 this._starredMessages = JSON.parse(data);
+            } else {
+                this._starredMessages = [];
             }
         } catch (e) {
             console.error('Failed to load starred messages:', e);
@@ -784,49 +872,53 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
     private _saveStarredMessages() {
         const fs = require('fs');
-        const os = require('os');
-        const path = require('path');
-        const dir = path.join(os.homedir(), '.panel-feedback');
         const filePath = this._getStarredFilePath();
+        if (!filePath) return;
 
         try {
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
             fs.writeFileSync(filePath, JSON.stringify(this._starredMessages, null, 2), 'utf-8');
         } catch (e) {
             console.error('Failed to save starred messages:', e);
         }
     }
 
-    private _toggleStarMessage(timestamp: number) {
-        // 检查是否已收藏
-        const starredIndex = this._starredMessages.findIndex(m => m.timestamp === timestamp);
+    private _toggleStarMessage(msgId: string) {
+        // 先检查是否已收藏
+        const starredIndex = this._starredMessages.findIndex(m => m.id === msgId);
 
         if (starredIndex !== -1) {
-            // 取消收藏
+            // 取消收藏 - 直接从收藏列表删除
             this._starredMessages.splice(starredIndex, 1);
+            
+            // 更新对话历史中的状态（如果存在）
+            const msgInHistory = this._chatHistory.find(m => m.id === msgId);
+            if (msgInHistory) {
+                msgInHistory.starred = false;
+            }
+            
+            this._saveStarredMessages();
+            this._view?.webview.postMessage({
+                type: 'starToggled',
+                msgId,
+                starred: false,
+                starredMessages: this._starredMessages
+            });
         } else {
-            // 添加收藏
-            const message = this._chatHistory.find(m => m.timestamp === timestamp);
+            // 添加收藏 - 从对话历史中查找
+            const message = this._chatHistory.find(m => m.id === msgId);
             if (message) {
                 this._starredMessages.push({ ...message, starred: true });
+                message.starred = true;
+                
+                this._saveStarredMessages();
+                this._view?.webview.postMessage({
+                    type: 'starToggled',
+                    msgId,
+                    starred: true,
+                    starredMessages: this._starredMessages
+                });
             }
         }
-
-        // 更新当前对话历史中的收藏状态
-        const msgInHistory = this._chatHistory.find(m => m.timestamp === timestamp);
-        if (msgInHistory) {
-            msgInHistory.starred = starredIndex === -1;
-        }
-
-        this._saveStarredMessages();
-        this._view?.webview.postMessage({
-            type: 'starToggled',
-            timestamp,
-            starred: starredIndex === -1,
-            starredMessages: this._starredMessages
-        });
     }
 
 
@@ -897,8 +989,166 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    public openStarredInEditor(context: vscode.ExtensionContext) {
+        const panel = vscode.window.createWebviewPanel(
+            'starredMessages',
+            '⭐ 收藏的消息',
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true
+            }
+        );
+
+        const updateContent = () => {
+            panel.webview.html = this._getStarredPanelHtml();
+        };
+
+        updateContent();
+
+        panel.webview.onDidReceiveMessage(data => {
+            if (data.type === 'unstar') {
+                // 直接从收藏列表删除
+                const index = this._starredMessages.findIndex(m => m.id === data.msgId);
+                if (index !== -1) {
+                    this._starredMessages.splice(index, 1);
+                    this._saveStarredMessages();
+                    updateContent();
+                    // 同步到侧边栏
+                    this._view?.webview.postMessage({
+                        type: 'starToggled',
+                        msgId: data.msgId,
+                        starred: false,
+                        starredMessages: this._starredMessages
+                    });
+                }
+            } else if (data.type === 'copyContent') {
+                vscode.env.clipboard.writeText(data.content);
+                vscode.window.showInformationMessage('已复制到剪贴板');
+            }
+        });
+    }
+
+    private _getStarredPanelHtml(): string {
+        const starredHtml = this._starredMessages.length === 0
+            ? '<div class="empty">暂无收藏的消息</div>'
+            : this._starredMessages.map(msg => `
+                <div class="starred-item" data-id="${msg.id}">
+                    <div class="starred-header">
+                        <span class="time">${new Date(msg.timestamp).toLocaleString()}</span>
+                        <div class="actions">
+                            <button class="btn copy-btn" data-content="${this._escapeAttr(msg.content)}" title="复制">📋</button>
+                            <button class="btn unstar-btn" data-id="${msg.id}" title="取消收藏">⭐</button>
+                        </div>
+                    </div>
+                    <div class="content">${this._escapeHtml(msg.content)}</div>
+                </div>
+            `).join('');
+
+        return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: var(--vscode-font-family);
+            padding: 16px;
+            color: var(--vscode-foreground);
+            background: var(--vscode-editor-background);
+        }
+        h1 {
+            font-size: 18px;
+            margin-bottom: 16px;
+            color: var(--vscode-foreground);
+        }
+        .empty {
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            padding: 40px;
+        }
+        .starred-item {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+        .starred-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .time {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+        }
+        .actions {
+            display: flex;
+            gap: 8px;
+        }
+        .btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0.7;
+        }
+        .btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        .content {
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <h1>⭐ 收藏的消息 (${this._starredMessages.length})</h1>
+    ${starredHtml}
+    <script>
+        const vscode = acquireVsCodeApi();
+        document.querySelectorAll('.unstar-btn').forEach(btn => {
+            btn.onclick = () => {
+                vscode.postMessage({ type: 'unstar', msgId: btn.dataset.id });
+            };
+        });
+        document.querySelectorAll('.copy-btn').forEach(btn => {
+            btn.onclick = () => {
+                vscode.postMessage({ type: 'copyContent', content: btn.dataset.content });
+                btn.textContent = '✓';
+                setTimeout(() => btn.textContent = '📋', 1500);
+            };
+        });
+    </script>
+</body>
+</html>`;
+    }
+
+    private _escapeHtml(text: string): string {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/\n/g, '<br>');
+    }
+
+    private _escapeAttr(text: string): string {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     public async showMessage(message: string, options?: string[], requestId?: string): Promise<string> {
-        console.log(`[Panel] showMessage called, requestId: ${requestId}, message length: ${message.length}`);
+        console.log(`[Panel] showMessage called, requestId: ${requestId}, message length: ${message.length}, options:`, options);
 
         this._currentMessage = message;
         this._currentOptions = options || [];
@@ -906,6 +1156,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
 
         // 记录 AI 消息到历史
         this._chatHistory.push({
+            id: generateId(),
             role: 'ai',
             content: message,
             timestamp: Date.now()
@@ -1029,7 +1280,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             gap: 12px;
         }
         .chat-bubble {
-            max-width: 90%;
+            width: calc(100% - 16px);
+            max-width: none;
             padding: 10px 14px;
             border-radius: 12px;
             line-height: 1.5;
@@ -1038,8 +1290,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .chat-bubble.ai {
             align-self: flex-start;
             background: var(--vscode-editor-background);
-            border: 1px solid var(--vscode-widget-border);
-            border-bottom-left-radius: 4px;
+            border: 1px solid var(--vscode-focusBorder);
+            border-radius: 8px;
+            padding: 12px;
         }
         .chat-bubble.user {
             align-self: flex-end;
@@ -1209,12 +1462,17 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             border-color: var(--vscode-focusBorder);
         }
         .current-question {
+            width: calc(100% - 16px);
+            max-width: none;
+            align-self: flex-start;
             background: var(--vscode-editor-background);
             border: 1px solid var(--vscode-focusBorder);
             border-radius: 8px;
             padding: 12px;
             margin-bottom: 12px;
             position: relative;
+            line-height: 1.5;
+            word-wrap: break-word;
         }
         .current-question .label {
             font-size: 11px;
@@ -1226,15 +1484,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             position: absolute;
             bottom: 8px;
             right: 8px;
-            padding: 4px 6px;
+            padding: 4px;
             background: transparent;
             color: var(--vscode-descriptionForeground);
-            border: 1px solid var(--vscode-widget-border);
+            border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 14px;
             opacity: 0.6;
-            transition: opacity 0.2s;
+            transition: all 0.15s;
         }
         .copy-btn:hover {
             opacity: 1;
@@ -1243,6 +1501,12 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .copy-btn.copied {
             color: var(--vscode-testing-iconPassed);
             border-color: var(--vscode-testing-iconPassed);
+        }
+        .current-question .star-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            bottom: auto;
         }
         .rules-modal {
             display: none;
@@ -1337,6 +1601,21 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
             margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .submit-options-btn {
+            padding: 4px 10px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .submit-options-btn:hover {
+            background: var(--vscode-button-hoverBackground);
         }
         .option-btn {
             display: flex;
@@ -1355,6 +1634,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .option-btn:hover {
             background: var(--vscode-list-hoverBackground);
             border-color: var(--vscode-focusBorder);
+        }
+        .option-btn.selected {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border-color: var(--vscode-button-background);
+        }
+        .option-btn.selected .option-key {
+            background: var(--vscode-button-foreground);
+            color: var(--vscode-button-background);
         }
         .option-btn .option-key {
             display: inline-flex;
@@ -2056,6 +2344,86 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-errorForeground);
         }
         
+        /* Rules 列表样式 */
+        .rule-form {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .rule-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .rule-input:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+        }
+        .rules-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+        .rule-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 10px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 6px;
+            gap: 8px;
+        }
+        .rule-item.disabled {
+            opacity: 0.5;
+        }
+        .rule-item .rule-toggle {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .rule-item .rule-content {
+            flex: 1;
+            font-size: 12px;
+            color: var(--vscode-foreground);
+            word-break: break-word;
+        }
+        .rule-item .rule-actions {
+            display: flex;
+            gap: 2px;
+            flex-shrink: 0;
+        }
+        .rule-item .rule-btn {
+            padding: 4px 6px;
+            border: none;
+            background: transparent;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0.6;
+            transition: all 0.15s;
+        }
+        .rule-item .rule-btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+        .rule-item .rule-btn.delete:hover {
+            color: var(--vscode-errorForeground);
+        }
+        .rules-empty {
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-size: 12px;
+            padding: 16px;
+        }
+        
         /* 模板选择弹出菜单 */
         .template-popup {
             position: absolute;
@@ -2131,18 +2499,20 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         .star-btn {
             position: absolute;
             top: 4px;
-            right: 28px;
+            right: 8px;
             background: transparent;
             border: none;
             cursor: pointer;
             font-size: 14px;
-            opacity: 0.5;
+            opacity: 0.6;
             transition: all 0.15s;
             padding: 4px;
+            color: var(--vscode-descriptionForeground);
         }
         .star-btn:hover {
             opacity: 1;
             transform: scale(1.1);
+            color: #FFD700;
         }
         .star-btn.starred {
             opacity: 1;
@@ -2150,6 +2520,32 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
         .chat-bubble {
             position: relative;
+        }
+        .chat-bubble.ai .label {
+            font-size: 11px;
+            color: var(--vscode-textLink-foreground);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        .bubble-copy-btn {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            padding: 4px;
+            background: transparent;
+            color: var(--vscode-descriptionForeground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            opacity: 0.6;
+            transition: all 0.15s;
+        }
+        .bubble-copy-btn:hover {
+            opacity: 1;
+        }
+        .bubble-copy-btn.copied {
+            color: var(--vscode-testing-iconPassed);
         }
     </style>
 </head>
@@ -2200,9 +2596,12 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             </div>
             
             <div class="settings-tab-content" id="tab-rules">
-                <div class="settings-hint">每次提交反馈时会自动附加这些内容给 AI</div>
-                <textarea id="rulesTextarea" class="rules-textarea" placeholder="例如：&#10;- 使用中文回复&#10;- 代码要有注释&#10;- 修改前先确认"></textarea>
-                <button class="settings-action" id="saveRules">💾 保存</button>
+                <div class="settings-hint">每次提交反馈时会自动附加已启用的规则给 AI（存储在项目目录）</div>
+                <div class="rule-form">
+                    <input type="text" id="ruleInput" placeholder="输入新规则..." class="rule-input">
+                    <button class="settings-action" id="addRule">➕ 添加</button>
+                </div>
+                <div id="rulesList" class="rules-list"></div>
             </div>
             
             <div class="settings-tab-content hidden" id="tab-templates">
@@ -2252,6 +2651,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         
         <!-- 当前问题区域 -->
         <div id="currentQuestion" class="current-question">
+            <button id="currentStarBtn" class="star-btn" title="收藏">☆</button>
             <button id="copyBtn" class="copy-btn" title="Copy">📋</button>
             <div class="label">🤖 AI</div>
             <div id="messageContent" class="message"></div>
@@ -2337,15 +2737,16 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         const fixedActions = document.getElementById('fixedActions');
         const settingsModal = document.getElementById('settingsModal');
         const closeSettings = document.getElementById('closeSettings');
-        const rulesTextarea = document.getElementById('rulesTextarea');
-        const saveRules = document.getElementById('saveRules');
+        const ruleInput = document.getElementById('ruleInput');
+        const addRuleBtn = document.getElementById('addRule');
+        const rulesList = document.getElementById('rulesList');
         const settingsTabs = document.querySelectorAll('.settings-tab');
         const clearHistoryBtn = document.getElementById('clearHistoryBtn');
         const settingsBtn = document.getElementById('settingsBtn');
 
         let images = [];
         let historyData = [];
-        let currentRules = '';
+        let currentRules = [];
         let workspaceName = '';
         
         // 输入历史记录（由后端统一管理）
@@ -2769,7 +3170,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         });
         
         settingsBtn.addEventListener('click', () => {
-            rulesTextarea.value = currentRules;
+            renderRulesList();
             settingsModal.classList.add('show');
         });
         
@@ -2789,13 +3190,78 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             });
         });
         
-        saveRules.addEventListener('click', () => {
-            currentRules = rulesTextarea.value.trim();
-            vscode.postMessage({ type: 'saveRules', rules: currentRules });
-            saveRules.textContent = '✅ 已保存';
-            setTimeout(() => {
-                saveRules.textContent = '💾 保存';
-            }, 1500);
+        // Rules 列表渲染
+        function renderRulesList() {
+            if (!rulesList) return;
+            if (currentRules.length === 0) {
+                rulesList.innerHTML = '<div class="rules-empty">暂无规则，添加一条试试</div>';
+                return;
+            }
+            rulesList.innerHTML = currentRules.map((rule, index) => \`
+                <div class="rule-item \${rule.enabled ? '' : 'disabled'}" data-id="\${rule.id}">
+                    <input type="checkbox" class="rule-toggle" \${rule.enabled ? 'checked' : ''} title="启用/禁用">
+                    <div class="rule-content">\${escapeHtml(rule.content)}</div>
+                    <div class="rule-actions">
+                        <button class="rule-btn edit" title="编辑">✏️</button>
+                        <button class="rule-btn delete" title="删除">🗑️</button>
+                    </div>
+                </div>
+            \`).join('');
+        }
+        
+        // 添加规则
+        addRuleBtn?.addEventListener('click', () => {
+            const content = ruleInput?.value?.trim();
+            if (content) {
+                vscode.postMessage({ type: 'addRule', content });
+                ruleInput.value = '';
+            }
+        });
+        
+        // 规则输入框回车添加
+        ruleInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const content = ruleInput.value.trim();
+                if (content) {
+                    vscode.postMessage({ type: 'addRule', content });
+                    ruleInput.value = '';
+                }
+            }
+        });
+        
+        // 规则列表事件委托
+        rulesList?.addEventListener('click', (e) => {
+            const target = e.target;
+            const ruleItem = target.closest('.rule-item');
+            if (!ruleItem) return;
+            const ruleId = ruleItem.dataset.id;
+            
+            // checkbox 由 change 事件处理，这里跳过
+            if (target.type === 'checkbox') return;
+            
+            if (target.classList.contains('delete') || target.closest('.rule-btn.delete')) {
+                e.stopPropagation();
+                vscode.postMessage({ type: 'deleteRule', id: ruleId });
+            } else if (target.classList.contains('edit') || target.closest('.rule-btn.edit')) {
+                e.stopPropagation();
+                const contentEl = ruleItem.querySelector('.rule-content');
+                const currentContent = contentEl.textContent;
+                const newContent = prompt('编辑规则:', currentContent);
+                if (newContent !== null && newContent.trim()) {
+                    vscode.postMessage({ type: 'updateRule', id: ruleId, content: newContent.trim() });
+                }
+            }
+        });
+        
+        // 规则列表 checkbox change 事件
+        rulesList?.addEventListener('change', (e) => {
+            const target = e.target;
+            if (target.type === 'checkbox' && target.classList.contains('rule-toggle')) {
+                const ruleItem = target.closest('.rule-item');
+                if (ruleItem) {
+                    vscode.postMessage({ type: 'toggleRule', id: ruleItem.dataset.id });
+                }
+            }
         });
         
         // 1秒闪烁效果
@@ -2850,15 +3316,18 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             
             chatHistory.style.display = 'flex';
             
-            historyToShow.forEach(msg => {
+            for (let i = 0; i < historyToShow.length; i++) {
+                const msg = historyToShow[i];
                 const bubble = document.createElement('div');
                 bubble.className = 'chat-bubble ' + msg.role;
                 
                 let content = '';
                 if (msg.role === 'ai') {
                     // 检查是否已收藏
-                    const isStarred = starredMessages.some(s => s.timestamp === msg.timestamp);
-                    content = '<button class="star-btn' + (isStarred ? ' starred' : '') + '" data-timestamp="' + msg.timestamp + '" title="收藏">' + (isStarred ? '★' : '☆') + '</button>';
+                    const isStarred = starredMessages.some(s => s.id === msg.id);
+                    content = '<button class="star-btn' + (isStarred ? ' starred' : '') + '" data-id="' + msg.id + '" title="收藏">' + (isStarred ? '★' : '☆') + '</button>';
+                    content += '<button class="bubble-copy-btn" title="复制">📋</button>';
+                    content += '<div class="label">🤖 AI</div>';
                     content += '<div class="message">' + renderMarkdown(msg.content) + '</div>';
                 } else {
                     content = '<div>' + (msg.content || '<em>(empty)</em>') + '</div>';
@@ -2873,23 +3342,43 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 content += '<div class="timestamp">' + formatTime(msg.timestamp) + '</div>';
                 
                 bubble.innerHTML = content;
-                
-                // 绑定收藏按钮事件
-                const starBtn = bubble.querySelector('.star-btn');
-                if (starBtn) {
-                    starBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        const timestamp = parseInt(starBtn.dataset.timestamp);
-                        vscode.postMessage({ type: 'toggleStar', timestamp });
-                    };
-                }
-                
                 chatHistory.appendChild(bubble);
-            });
+            }
             
             // 滚动到底部
             scrollToBottom();
         }
+        
+        // 使用事件委托处理收藏按钮和复制按钮点击
+        chatHistory.addEventListener('click', function(e) {
+            const starBtn = e.target.closest('.star-btn');
+            if (starBtn) {
+                e.stopPropagation();
+                const msgId = starBtn.getAttribute('data-id');
+                if (msgId) {
+                    vscode.postMessage({ type: 'toggleStar', msgId });
+                }
+                return;
+            }
+            
+            const copyBtn = e.target.closest('.bubble-copy-btn');
+            if (copyBtn) {
+                e.stopPropagation();
+                const bubble = copyBtn.closest('.chat-bubble');
+                const msgEl = bubble.querySelector('.message');
+                if (msgEl) {
+                    const content = msgEl.innerText || msgEl.textContent;
+                    navigator.clipboard.writeText(content).then(() => {
+                        copyBtn.textContent = '✓';
+                        copyBtn.classList.add('copied');
+                        setTimeout(() => {
+                            copyBtn.textContent = '📋';
+                            copyBtn.classList.remove('copied');
+                        }, 1500);
+                    });
+                }
+            }
+        });
         
         function scrollToBottom() {
             setTimeout(() => {
@@ -2919,6 +3408,11 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             if (history && history.length > 0) {
                 historyData = history;
                 renderHistory(history);
+                // 更新当前问题的收藏按钮状态（最后一条是当前消息）
+                const currentMsg = history[history.length - 1];
+                if (currentMsg && currentMsg.role === 'ai') {
+                    updateCurrentStarBtn(currentMsg.id);
+                }
             }
             
             messageContent.innerHTML = renderMarkdown(message);
@@ -2929,22 +3423,49 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             // 滚动到底部
             scrollToBottom();
             
-            // 渲染选项按钮
+            // 渲染选项按钮（支持多选）
             optionsContainer.innerHTML = '';
+            let selectedOptions = [];
+            
             if (options && options.length > 0) {
-                const title = document.createElement('div');
-                title.className = 'options-title';
-                title.textContent = '选择一个选项：';
-                optionsContainer.appendChild(title);
+                const header = document.createElement('div');
+                header.className = 'options-title';
+                header.innerHTML = '选择选项（可多选）：<button id="submitOptions" class="submit-options-btn" style="display:none;">确认选择</button>';
+                optionsContainer.appendChild(header);
+                
+                const submitOptionsBtn = header.querySelector('#submitOptions');
                 
                 options.forEach((opt, idx) => {
                     const btn = document.createElement('button');
                     btn.className = 'option-btn';
                     const keyLabel = String.fromCharCode(65 + idx); // A, B, C...
                     btn.innerHTML = '<span class="option-key">' + keyLabel + '</span><span class="option-text">' + opt + '</span>';
-                    btn.onclick = () => selectOption(opt);
+                    btn.dataset.option = opt;
+                    btn.onclick = (e) => {
+                        if (e.ctrlKey || e.metaKey || selectedOptions.length > 0) {
+                            // 多选模式
+                            btn.classList.toggle('selected');
+                            if (btn.classList.contains('selected')) {
+                                selectedOptions.push(opt);
+                            } else {
+                                selectedOptions = selectedOptions.filter(o => o !== opt);
+                            }
+                            submitOptionsBtn.style.display = selectedOptions.length > 0 ? 'inline-block' : 'none';
+                        } else {
+                            // 单选模式，直接提交
+                            selectOption(opt);
+                        }
+                    };
                     optionsContainer.appendChild(btn);
                 });
+                
+                submitOptionsBtn.onclick = () => {
+                    if (selectedOptions.length > 0) {
+                        selectOption(selectedOptions.join(', '));
+                        selectedOptions = [];
+                    }
+                };
+                
                 optionsContainer.style.display = 'flex';
             } else {
                 optionsContainer.style.display = 'none';
@@ -2984,9 +3505,15 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             showWaitingState();
         }
         
+        // 生成唯一 ID
+        function generateMsgId() {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+        }
+        
         // 添加用户回复到本地历史
         function addUserReplyToHistory(text, imgs) {
             historyData.push({
+                id: generateMsgId(),
                 role: 'user',
                 content: text,
                 timestamp: Date.now(),
@@ -3235,6 +3762,29 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             });
         };
 
+        // 当前问题收藏按钮
+        const currentStarBtn = document.getElementById('currentStarBtn');
+        let currentMsgId = null;
+        
+        currentStarBtn.onclick = () => {
+            if (currentMsgId) {
+                vscode.postMessage({ type: 'toggleStar', msgId: currentMsgId });
+            }
+        };
+        
+        // 更新当前问题收藏状态的函数
+        function updateCurrentStarBtn(msgId) {
+            currentMsgId = msgId;
+            const isStarred = starredMessages.some(s => s.id === msgId);
+            currentStarBtn.textContent = isStarred ? '★' : '☆';
+            currentStarBtn.textContent = isStarred ? '★' : '☆';
+            if (isStarred) {
+                currentStarBtn.classList.add('starred');
+            } else {
+                currentStarBtn.classList.remove('starred');
+            }
+        }
+
         // 点击弹窗外部关闭
         settingsModal.onclick = (e) => {
             if (e.target === settingsModal) {
@@ -3333,8 +3883,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: 'loadStarred' });
         
         starredBtn.onclick = () => {
-            renderStarredList();
-            starredModal.classList.add('show');
+            vscode.postMessage({ type: 'openStarredInEditor' });
         };
         
         closeStarredBtn.onclick = () => {
@@ -3353,19 +3902,19 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 return;
             }
             starredList.innerHTML = starredMessages.map(msg => \`
-                <div class="starred-item" data-timestamp="\${msg.timestamp}">
+                <div class="starred-item" data-id="\${msg.id}">
                     <div class="starred-item-header">
                         <span class="starred-item-time">\${new Date(msg.timestamp).toLocaleString()}</span>
                         <button class="template-item-btn delete unstar-btn" title="取消收藏">⭐</button>
                     </div>
-                    <div class="starred-item-content">\${escapeHtml(msg.content.substring(0, 200))}\${msg.content.length > 200 ? '...' : ''}</div>
+                    <div class="starred-item-content">\${escapeHtml(msg.content.substring(0, 500))}\${msg.content.length > 500 ? '...' : ''}</div>
                 </div>
             \`).join('');
             
             starredList.querySelectorAll('.unstar-btn').forEach(btn => {
                 btn.onclick = (e) => {
-                    const timestamp = parseInt(e.target.closest('.starred-item').dataset.timestamp);
-                    vscode.postMessage({ type: 'toggleStar', timestamp });
+                    const msgId = e.target.closest('.starred-item').dataset.id;
+                    vscode.postMessage({ type: 'toggleStar', msgId });
                 };
             });
         }
@@ -3392,11 +3941,12 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     renderHistory(historyData, true);
                     break;
                 case 'openSettings':
-                    rulesTextarea.value = currentRules;
+                    renderRulesList();
                     settingsModal.classList.add('show');
                     break;
                 case 'rulesLoaded':
-                    currentRules = data.rules || '';
+                    currentRules = data.rules || [];
+                    renderRulesList();
                     break;
                 case 'resetToEmpty':
                     historyData = [];
@@ -3439,8 +3989,8 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'starToggled':
                     starredMessages = data.starredMessages || [];
-                    // 更新当前显示的消息收藏状态
-                    const starBtn = document.querySelector(\`.star-btn[data-timestamp="\${data.timestamp}"]\`);
+                    // 更新历史消息中的收藏状态
+                    const starBtn = document.querySelector(\`.star-btn[data-id="\${data.msgId}"]\`);
                     if (starBtn) {
                         if (data.starred) {
                             starBtn.classList.add('starred');
@@ -3448,6 +3998,16 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                         } else {
                             starBtn.classList.remove('starred');
                             starBtn.textContent = '☆';
+                        }
+                    }
+                    // 更新当前问题的收藏按钮
+                    if (currentMsgId === data.msgId) {
+                        if (data.starred) {
+                            currentStarBtn.classList.add('starred');
+                            currentStarBtn.textContent = '★';
+                        } else {
+                            currentStarBtn.classList.remove('starred');
+                            currentStarBtn.textContent = '☆';
                         }
                     }
                     renderStarredList();

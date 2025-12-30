@@ -67,6 +67,7 @@ export class MCPServer {
     private async processRequest(request: PendingRequest) {
         try {
             const { message, predefined_options } = request.params.arguments || {};
+            console.log('[MCP] processRequest - message:', message?.substring(0, 50), 'options:', predefined_options);
             
             const feedback = await this.provider.showMessage(
                 message || '',

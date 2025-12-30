@@ -245,7 +245,7 @@ rl.on('line', async (line) => {
                 result: {
                     tools: [{
                         name: 'panel_feedback',
-                        description: '在 IDE 侧边栏显示消息并获取用户反馈，支持预定义选项和图片上传',
+                        description: '在 IDE 侧边栏显示消息并获取用户反馈。强烈建议提供 predefined_options 让用户快速选择，提升交互体验。支持图片上传。',
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -256,7 +256,7 @@ rl.on('line', async (line) => {
                                 predefined_options: {
                                     type: 'array',
                                     items: { type: 'string' },
-                                    description: '预定义的选项按钮列表'
+                                    description: '预定义的快捷选项按钮列表，用户可以一键点击选择。建议提供 2-5 个常用选项，如 ["继续", "取消", "查看详情"] 或 ["是", "否"]。这能大幅提升用户体验！'
                                 }
                             },
                             required: ['message']

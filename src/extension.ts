@@ -259,12 +259,12 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // 在编辑器中打开 - 已移除，只保留边栏
-    // context.subscriptions.push(
-    //     vscode.commands.registerCommand('feedbackPanel.openInEditor', () => {
-    //         provider.openInEditor(context);
-    //     })
-    // );
+    // 在编辑器标签页中打开收藏列表
+    context.subscriptions.push(
+        vscode.commands.registerCommand('feedbackPanel.openStarredInEditor', () => {
+            provider.openStarredInEditor(context);
+        })
+    );
 
 }
 
