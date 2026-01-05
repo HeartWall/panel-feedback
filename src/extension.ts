@@ -266,6 +266,13 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // 在编辑器标签页中打开 Rules 设置
+    context.subscriptions.push(
+        vscode.commands.registerCommand('feedbackPanel.openRulesInEditor', () => {
+            provider.openRulesInEditor(context);
+        })
+    );
+
 }
 
 export function deactivate() {

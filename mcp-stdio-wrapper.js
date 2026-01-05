@@ -16,7 +16,7 @@ const REGISTRY_DIR = path.join(os.homedir(), '.panel-feedback');
 const DEFAULT_PORT = 19876;
 const POLL_INTERVAL = 500;  // 500ms 轮询间隔
 const MAX_POLL_TIME = 86400000 * 7;  // 最长等待 7 天
-const SOFT_TIMEOUT = 120000;  // 2分钟软超时，自动返回让AI继续
+const SOFT_TIMEOUT = 300000;  // 5分钟软超时，自动返回让AI继续
 
 const rl = readline.createInterface({
     input: process.stdin,

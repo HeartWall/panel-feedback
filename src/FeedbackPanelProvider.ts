@@ -180,6 +180,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                 case 'openStarredInEditor':
                     vscode.commands.executeCommand('feedbackPanel.openStarredInEditor');
                     break;
+                case 'openRulesInEditor':
+                    vscode.commands.executeCommand('feedbackPanel.openRulesInEditor');
+                    break;
             }
         });
     }
@@ -1145,6 +1148,242 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+    }
+
+    // 在编辑器标签页中打开 Rules 设置
+    public openRulesInEditor(context: vscode.ExtensionContext) {
+        this._loadRulesSync();
+        
+        const panel = vscode.window.createWebviewPanel(
+            'rulesSettings',
+            '📝 Rules 设置',
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true
+            }
+        );
+
+        const updateContent = () => {
+            panel.webview.html = this._getRulesPanelHtml();
+        };
+
+        updateContent();
+
+        panel.webview.onDidReceiveMessage(data => {
+            switch (data.type) {
+                case 'addRule':
+                    this._addRule(data.content);
+                    updateContent();
+                    break;
+                case 'deleteRule':
+                    this._deleteRule(data.id);
+                    updateContent();
+                    break;
+                case 'toggleRule':
+                    this._toggleRule(data.id);
+                    updateContent();
+                    break;
+                case 'updateRule':
+                    this._updateRule(data.id, data.content);
+                    updateContent();
+                    break;
+            }
+        });
+    }
+
+    private _loadRulesSync() {
+        const fs = require('fs');
+        const dataDir = this._getWorkspaceDataDir();
+        if (!dataDir) {
+            this._rules = [];
+            return;
+        }
+        const rulesFile = path.join(dataDir, 'rules.json');
+        try {
+            if (fs.existsSync(rulesFile)) {
+                const data = fs.readFileSync(rulesFile, 'utf-8');
+                this._rules = JSON.parse(data);
+            } else {
+                this._rules = [];
+            }
+        } catch (e) {
+            this._rules = [];
+        }
+    }
+
+    private _getRulesPanelHtml(): string {
+        const rulesHtml = this._rules.length === 0
+            ? '<div class="empty">暂无规则，添加一条试试</div>'
+            : this._rules.map(rule => `
+                <div class="rule-item ${rule.enabled ? '' : 'disabled'}" data-id="${rule.id}">
+                    <input type="checkbox" class="rule-toggle" ${rule.enabled ? 'checked' : ''}>
+                    <div class="rule-content">${this._escapeHtml(rule.content)}</div>
+                    <div class="rule-actions">
+                        <button class="btn edit-btn" data-id="${rule.id}" data-content="${this._escapeAttr(rule.content)}" title="编辑">✏️</button>
+                        <button class="btn delete-btn" data-id="${rule.id}" title="删除">🗑️</button>
+                    </div>
+                </div>
+            `).join('');
+
+        return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: var(--vscode-font-family);
+            padding: 16px;
+            color: var(--vscode-foreground);
+            background: var(--vscode-editor-background);
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: var(--vscode-foreground);
+        }
+        .hint {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            margin-bottom: 16px;
+        }
+        .add-form {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .add-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .add-input:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+        }
+        .add-btn {
+            padding: 8px 16px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .add-btn:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .empty {
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            padding: 40px;
+        }
+        .rule-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+        .rule-item.disabled {
+            opacity: 0.5;
+        }
+        .rule-toggle {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        .rule-content {
+            flex: 1;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+        .rule-actions {
+            display: flex;
+            gap: 4px;
+        }
+        .btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0.7;
+        }
+        .btn:hover {
+            opacity: 1;
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+    </style>
+</head>
+<body>
+    <h1>📝 Rules 设置</h1>
+    <div class="hint">每次提交反馈时会自动附加已启用的规则给 AI（存储在项目目录 .panel-feedback/）</div>
+    
+    <div class="add-form">
+        <input type="text" class="add-input" id="ruleInput" placeholder="输入新规则...">
+        <button class="add-btn" id="addBtn">➕ 添加</button>
+    </div>
+    
+    <div class="rules-list">
+        ${rulesHtml}
+    </div>
+    
+    <script>
+        const vscode = acquireVsCodeApi();
+        
+        const ruleInput = document.getElementById('ruleInput');
+        const addBtn = document.getElementById('addBtn');
+        
+        addBtn.onclick = () => {
+            const content = ruleInput.value.trim();
+            if (content) {
+                vscode.postMessage({ type: 'addRule', content });
+                ruleInput.value = '';
+            }
+        };
+        
+        ruleInput.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                addBtn.click();
+            }
+        };
+        
+        document.querySelectorAll('.rule-toggle').forEach(toggle => {
+            toggle.onchange = () => {
+                const id = toggle.closest('.rule-item').dataset.id;
+                vscode.postMessage({ type: 'toggleRule', id });
+            };
+        });
+        
+        document.querySelectorAll('.edit-btn').forEach(btn => {
+            btn.onclick = () => {
+                const content = btn.dataset.content;
+                const newContent = prompt('编辑规则:', content);
+                if (newContent !== null && newContent.trim()) {
+                    vscode.postMessage({ type: 'updateRule', id: btn.dataset.id, content: newContent.trim() });
+                }
+            };
+        });
+        
+        document.querySelectorAll('.delete-btn').forEach(btn => {
+            btn.onclick = () => {
+                vscode.postMessage({ type: 'deleteRule', id: btn.dataset.id });
+            };
+        });
+    </script>
+</body>
+</html>`;
     }
 
     public async showMessage(message: string, options?: string[], requestId?: string): Promise<string> {
@@ -2462,6 +2701,9 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         }
         
         /* 收藏列表样式 */
+        .starred-actions {
+            margin-bottom: 12px;
+        }
         .starred-list {
             max-height: 400px;
             overflow-y: auto;
@@ -2591,6 +2833,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
             
             <div class="settings-tabs">
                 <button class="settings-tab active" data-tab="rules">📝 Rules</button>
+                <button class="settings-tab" data-tab="starred">⭐ 收藏</button>
                 <button class="settings-tab" data-tab="templates">📋 模板</button>
                 <button class="settings-tab" data-tab="actions">⚡ 快捷操作</button>
             </div>
@@ -2602,6 +2845,14 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
                     <button class="settings-action" id="addRule">➕ 添加</button>
                 </div>
                 <div id="rulesList" class="rules-list"></div>
+            </div>
+            
+            <div class="settings-tab-content hidden" id="tab-starred">
+                <div class="settings-hint">收藏的消息（存储在项目目录）</div>
+                <div class="starred-actions">
+                    <button class="settings-action" id="openStarredEditor">📄 在编辑器中打开</button>
+                </div>
+                <div id="starredList" class="starred-list"></div>
             </div>
             
             <div class="settings-tab-content hidden" id="tab-templates">
@@ -2624,17 +2875,6 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
     <div id="exportMenu" class="export-menu hidden">
         <div class="export-menu-item" data-format="md">📄 导出为 Markdown</div>
         <div class="export-menu-item" data-format="json">📋 导出为 JSON</div>
-    </div>
-
-    <!-- 收藏列表模态框 -->
-    <div id="starredModal" class="settings-modal">
-        <div class="settings-content">
-            <div class="settings-title">
-                <span>⭐ 收藏的消息</span>
-                <button class="settings-close" id="closeStarred">×</button>
-            </div>
-            <div id="starredList" class="starred-list"></div>
-        </div>
     </div>
 
     <div id="emptyState" class="empty-state">
@@ -3170,8 +3410,7 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         });
         
         settingsBtn.addEventListener('click', () => {
-            renderRulesList();
-            settingsModal.classList.add('show');
+            vscode.postMessage({ type: 'openRulesInEditor' });
         });
         
         // 设置弹窗事件
@@ -3875,25 +4114,24 @@ export class FeedbackPanelProvider implements vscode.WebviewViewProvider {
         // ========== 收藏功能 ==========
         let starredMessages = [];
         const starredBtn = document.getElementById('starredBtn');
-        const starredModal = document.getElementById('starredModal');
         const starredList = document.getElementById('starredList');
-        const closeStarredBtn = document.getElementById('closeStarred');
+        const openStarredEditorBtn = document.getElementById('openStarredEditor');
         
         // 加载收藏
         vscode.postMessage({ type: 'loadStarred' });
         
         starredBtn.onclick = () => {
+            // 打开设置弹窗并切换到收藏 Tab
+            settingsModal.classList.add('show');
+            document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.add('hidden'));
+            document.querySelector('.settings-tab[data-tab="starred"]').classList.add('active');
+            document.getElementById('tab-starred').classList.remove('hidden');
+            renderStarredList();
+        };
+        
+        openStarredEditorBtn.onclick = () => {
             vscode.postMessage({ type: 'openStarredInEditor' });
-        };
-        
-        closeStarredBtn.onclick = () => {
-            starredModal.classList.remove('show');
-        };
-        
-        starredModal.onclick = (e) => {
-            if (e.target === starredModal) {
-                starredModal.classList.remove('show');
-            }
         };
         
         function renderStarredList() {
